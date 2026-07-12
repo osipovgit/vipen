@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+set -u
+
+container="{{ vpn_monitor_container_name }}"
+panel_host="{{ vpn_monitor_panel_host }}"
+panel_port="{{ vpn_monitor_panel_port }}"
+disk_warn="{{ vpn_monitor_disk_warn_percent }}"
+disk_fail="{{ vpn_monitor_disk_fail_percent }}"
+mem_warn="{{ vpn_monitor_mem_warn_mb }}"
+conntrack_warn="{{ vpn_monitor_conntrack_warn_percent }}"
+auto_restart="{{ vpn_monitor_auto_restart | bool | ternary('true', 'false') }}"
+failure_threshold="{{ vpn_monitor_failure_threshold }}"
+state_file="/run/vpn-health.failures"
+
+# Diagnostic (non-mutating) mode: report status/exit code but never touch the
+# shared failure counter and never restart the container. Used by the manual
+# healthcheck so diagnostics can't trigger an auto-restart. Enable with the
+# --no-restart flag or VPN_HEALTH_NO_RESTART=1.
+no_restart="false"
+for arg in "$@"; do
+  case "$arg" in
+    --no-restart|--diagnostic|--dry-run) no_restart="true" ;;
+  esac
+done
+[ "${VPN_HEALTH_NO_RESTART:-}" = "1" ] && no_restart="true"
+
+tcp_ports=({% for port in vpn_monitor_tcp_ports %}{{ port }}{% if not loop.last %} {% endif %}{% endfor %})
+
+status="OK"
+messages=()
+
+mark_warn() {
+  if [ "$status" = "OK" ]; then
+    status="WARN"
+  fi
+  messages+=("$1")
+}
+
+mark_fail() {
+  status="FAIL"
+  messages+=("$1")
+}
+
+check_tcp() {
+  local host="$1"
+  local port="$2"
+  timeout 5 bash -c "</dev/tcp/${host}/${port}" >/dev/null 2>&1
+}
+
+if ! command -v docker >/dev/null 2>&1; then
+  mark_fail "docker command missing"
+else
+  running="$(docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}' "$container" 2>/dev/null || true)"
+  restart_count="$(docker inspect -f '{{ "{{" }}.RestartCount{{ "}}" }}' "$container" 2>/dev/null || echo unknown)"
+  if [ "$running" != "true" ]; then
+    mark_fail "container ${container} not running"
+  else
+    messages+=("container=${container} running restart_count=${restart_count}")
+  fi
+fi
+
+if ! check_tcp "$panel_host" "$panel_port"; then
+  mark_fail "panel tcp ${panel_host}:${panel_port} unavailable"
+else
+  messages+=("panel_tcp=${panel_host}:${panel_port} ok")
+fi
+
+for port in "${tcp_ports[@]}"; do
+  if ! check_tcp "127.0.0.1" "$port"; then
+    mark_fail "local tcp 127.0.0.1:${port} unavailable"
+  else
+    messages+=("local_tcp=127.0.0.1:${port} ok")
+  fi
+done
+
+if command -v docker >/dev/null 2>&1 && [ "${running:-false}" = "true" ]; then
+  # Match xray on any architecture (xray-linux-amd64, xray-linux-arm64, ...).
+  if docker exec "$container" sh -lc 'ps | grep -q "[x]ray-linux"' >/dev/null 2>&1; then
+    messages+=("xray_process=ok")
+  else
+    mark_fail "xray process missing inside container"
+  fi
+fi
+
+disk_used="$(df -P / | awk 'NR==2 {gsub("%", "", $5); print $5}')"
+if [ -n "$disk_used" ]; then
+  if [ "$disk_used" -ge "$disk_fail" ]; then
+    mark_fail "disk_used=${disk_used}%"
+  elif [ "$disk_used" -ge "$disk_warn" ]; then
+    mark_warn "disk_used=${disk_used}%"
+  else
+    messages+=("disk_used=${disk_used}%")
+  fi
+fi
+
+mem_available_mb="$(awk '/MemAvailable/ {print int($2 / 1024)}' /proc/meminfo)"
+if [ -n "$mem_available_mb" ]; then
+  if [ "$mem_available_mb" -lt "$mem_warn" ]; then
+    mark_warn "mem_available=${mem_available_mb}MB"
+  else
+    messages+=("mem_available=${mem_available_mb}MB")
+  fi
+fi
+
+if [ -r /proc/sys/net/netfilter/nf_conntrack_count ] && [ -r /proc/sys/net/netfilter/nf_conntrack_max ]; then
+  conntrack_count="$(cat /proc/sys/net/netfilter/nf_conntrack_count)"
+  conntrack_max="$(cat /proc/sys/net/netfilter/nf_conntrack_max)"
+  conntrack_used=$((conntrack_count * 100 / conntrack_max))
+  if [ "$conntrack_used" -ge "$conntrack_warn" ]; then
+    mark_warn "conntrack=${conntrack_count}/${conntrack_max} (${conntrack_used}%)"
+  else
+    messages+=("conntrack=${conntrack_count}/${conntrack_max}")
+  fi
+fi
+
+# Informational metrics. These never change status; they add visibility for
+# diagnosing "sometimes slow / times out" without needing a heavier monitor.
+load1="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
+[ -n "$load1" ] && messages+=("load1=${load1}")
+
+if command -v ss >/dev/null 2>&1; then
+  established=0
+  for port in "${tcp_ports[@]}"; do
+    port_conns="$(ss -H -tn state established "( sport = :${port} )" 2>/dev/null | wc -l)"
+    established=$((established + port_conns))
+  done
+  messages+=("established=${established}")
+fi
+
+if journalctl -k --since "2 minutes ago" --no-pager 2>/dev/null | grep -q 'clocksource: Long readout interval'; then
+  mark_warn "hypervisor_pause_detected"
+fi
+
+failures=0
+if [ -r "$state_file" ]; then
+  failures="$(cat "$state_file" 2>/dev/null || echo 0)"
+fi
+case "$failures" in
+  ''|*[!0-9]*) failures=0 ;;
+esac
+
+if [ "$no_restart" = "true" ]; then
+  # Diagnostic mode: read-only. Report the current stored counter without
+  # mutating it and without restarting the container.
+  messages+=("mode=diagnostic")
+else
+  if [ "$status" = "FAIL" ]; then
+    failures=$((failures + 1))
+    printf '%s\n' "$failures" > "$state_file"
+  else
+    failures=0
+    printf '0\n' > "$state_file"
+  fi
+
+  if [ "$status" = "FAIL" ] && [ "$auto_restart" = "true" ] && [ "$failures" -ge "$failure_threshold" ]; then
+    if command -v docker >/dev/null 2>&1; then
+      messages+=("auto_restart=triggered failures=${failures}")
+      docker restart "$container" >/dev/null 2>&1 || true
+      printf '0\n' > "$state_file"
+    fi
+  fi
+fi
+
+line="status=${status} failures=${failures} ${messages[*]}"
+logger -t vpn-health "$line"
+printf '%s\n' "$line"
+
+if [ "$status" = "FAIL" ]; then
+  exit 1
+fi

@@ -1,0 +1,9 @@
+---
+# Single systemd daemon-reload for the whole role. Every unit-file task notifies
+# this handler; Ansible de-duplicates handlers, so daemon-reload runs at most
+# once per play no matter how many unit files changed (and not at all if none
+# did). The scripts are not units, so they do not notify it.
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: not ansible_check_mode

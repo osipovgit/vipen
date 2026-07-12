@@ -1,0 +1,38 @@
+---
+- name: Refresh apt cache before system updates
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 1800
+  when:
+    - system_updates_enabled | bool
+    - not ansible_check_mode
+
+- name: Upgrade installed packages safely
+  ansible.builtin.apt:
+    upgrade: safe
+  when:
+    - system_updates_enabled | bool
+    - not ansible_check_mode
+
+- name: Remove unused apt packages
+  ansible.builtin.apt:
+    autoremove: true
+  when:
+    - system_updates_enabled | bool
+    - not ansible_check_mode
+
+- name: Clean apt package cache
+  ansible.builtin.apt:
+    clean: true
+  when:
+    - system_updates_enabled | bool
+    - not ansible_check_mode
+
+- name: Check whether reboot is required
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: reboot_required
+
+- name: Report reboot requirement
+  ansible.builtin.debug:
+    msg: "Reboot required: {{ reboot_required.stat.exists }}"

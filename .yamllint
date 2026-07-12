@@ -1,0 +1,21 @@
+---
+extends: default
+
+ignore: |
+  .github/
+  backups/
+  .ansible/
+
+rules:
+  # This project favours readable, long single-line vars/commands.
+  line-length:
+    max: 200
+    level: warning
+  comments:
+    min-spaces-from-content: 1
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+  document-start:
+    present: true
+  octal-values: disable

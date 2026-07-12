@@ -1,0 +1,118 @@
+---
+# 1. Install all files first. Unit-file tasks notify a single daemon-reload
+#    handler; the scripts do not (a script change needs a service restart, not
+#    a daemon-reload).
+- name: Install VPN health check script
+  ansible.builtin.template:
+    src: vpn-health-check.j2
+    dest: "{{ vpn_monitor_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  register: vpn_monitor_script
+  when: vpn_monitor_enabled | bool
+
+- name: Install VPN health systemd service
+  ansible.builtin.template:
+    src: vpn-health.service.j2
+    dest: /etc/systemd/system/vpn-health.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: vpn_monitor_service
+  notify: Reload systemd daemon
+  when: vpn_monitor_enabled | bool
+
+- name: Install VPN health systemd timer
+  ansible.builtin.template:
+    src: vpn-health.timer.j2
+    dest: /etc/systemd/system/vpn-health.timer
+    owner: root
+    group: root
+    mode: "0644"
+  register: vpn_monitor_timer
+  notify: Reload systemd daemon
+  when: vpn_monitor_enabled | bool
+
+- name: Install VPS host monitor script
+  ansible.builtin.template:
+    src: vps-host-monitor.j2
+    dest: "{{ vps_host_monitor_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  register: vps_host_monitor_script
+  when: vps_host_monitor_enabled | bool
+
+- name: Install VPS host monitor service
+  ansible.builtin.template:
+    src: vps-host-monitor.service.j2
+    dest: /etc/systemd/system/vps-host-monitor.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: vps_host_monitor_service
+  notify: Reload systemd daemon
+  when: vps_host_monitor_enabled | bool
+
+# 2. Apply all unit-file changes with a single daemon-reload before any unit is
+#    enabled or started, so systemd already knows the freshly written units.
+- name: Reload systemd once for all monitor units
+  ansible.builtin.meta: flush_handlers
+
+# 3. Enable/start units.
+- name: Enable and start VPN health timer
+  ansible.builtin.systemd:
+    name: vpn-health.timer
+    enabled: true
+    state: started
+  when:
+    - vpn_monitor_enabled | bool
+    - not ansible_check_mode
+
+# A running timer keeps its old schedule after a mere daemon-reload; restart it
+# so a changed interval (vpn_monitor_interval) takes effect now. Only the .timer
+# file matters here — a changed .service is picked up on the next timer tick.
+- name: Restart VPN health timer after schedule changes
+  ansible.builtin.systemd:
+    name: vpn-health.timer
+    state: restarted
+  when:
+    - vpn_monitor_enabled | bool
+    - vpn_monitor_timer.changed
+    - not ansible_check_mode
+
+- name: Restart VPS host monitor after configuration changes
+  ansible.builtin.systemd:
+    name: vps-host-monitor.service
+    state: restarted
+  when:
+    - vps_host_monitor_enabled | bool
+    - vps_host_monitor_script.changed or vps_host_monitor_service.changed
+    - not ansible_check_mode
+
+- name: Enable and start VPS host monitor
+  ansible.builtin.systemd:
+    name: vps-host-monitor.service
+    enabled: true
+    state: started
+  when:
+    - vps_host_monitor_enabled | bool
+    - not ansible_check_mode
+
+# 4. Diagnostic: run the health check once and surface the result.
+- name: Run VPN health check once
+  ansible.builtin.command: "{{ vpn_monitor_script_path }}"
+  register: vpn_monitor_check
+  changed_when: false
+  when:
+    - vpn_monitor_enabled | bool
+    - not ansible_check_mode
+
+- name: Show VPN health check result
+  ansible.builtin.debug:
+    msg: "{{ vpn_monitor_check.stdout_lines }}"
+  when:
+    - vpn_monitor_enabled | bool
+    - vpn_monitor_check is defined
+    - not ansible_check_mode

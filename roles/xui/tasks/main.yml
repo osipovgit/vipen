@@ -1,0 +1,426 @@
+---
+- name: Ensure 3x-ui directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - "{{ xui_compose_dir }}"
+    - "{{ xui_db_dir }}"
+    - "{{ xui_cert_dir }}"
+    - "{{ xui_backup_dir }}"
+
+- name: Check existing 3x-ui database
+  ansible.builtin.stat:
+    path: "{{ xui_db_dir }}/x-ui.db"
+  register: xui_db
+  tags: [panel]
+
+- name: Check existing docker-compose file
+  ansible.builtin.stat:
+    path: "{{ xui_compose_dir }}/docker-compose.yml"
+  register: xui_compose_file
+
+- name: Validate local 3x-ui database restore file
+  ansible.builtin.stat:
+    path: "{{ xui_restore_db_local_path }}"
+  delegate_to: localhost
+  become: false
+  register: xui_restore_db_local
+  when: xui_restore_db_enabled | default(false) | bool
+
+- name: Fail when requested 3x-ui database restore file is missing
+  ansible.builtin.fail:
+    msg: "xui_restore_db_local_path must point to an existing local x-ui.db backup"
+  when:
+    - xui_restore_db_enabled | default(false) | bool
+    - xui_restore_db_local_path | length == 0 or not xui_restore_db_local.stat.exists
+
+- name: Fail before overwriting existing 3x-ui database without force
+  ansible.builtin.fail:
+    msg: "Remote x-ui.db already exists; set xui_restore_db_force: true to overwrite it"
+  when:
+    - xui_restore_db_enabled | default(false) | bool
+    - xui_db.stat.exists
+    - not (xui_restore_db_force | default(false) | bool)
+
+# Consistent hot backup of the live SQLite DB (online backup API + integrity
+# check), not a raw file copy which can be torn under WAL/journal.
+- name: Backup existing 3x-ui database (consistent SQLite snapshot)
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import sqlite3, sys
+        src, dst = sys.argv[1], sys.argv[2]
+        source = sqlite3.connect("file:%s?mode=ro" % src, uri=True, timeout=30)
+        dest = sqlite3.connect(dst)
+        try:
+            with dest:
+                source.backup(dest)
+            result = dest.execute("pragma integrity_check").fetchone()
+        finally:
+            source.close()
+            dest.close()
+        status = result[0] if result else "unknown"
+        if status != "ok":
+            sys.stderr.write("integrity_check=%s\n" % status)
+            raise SystemExit(2)
+        print("integrity_check=ok")
+      - "{{ xui_db_dir }}/x-ui.db"
+      - "{{ xui_backup_dir }}/x-ui.db.bak-{{ ansible_facts['date_time']['iso8601_basic_short'] }}"
+  changed_when: true
+  when:
+    - xui_db.stat.exists
+    - not ansible_check_mode
+
+- name: Restrict 3x-ui database backup permissions
+  ansible.builtin.file:
+    path: "{{ xui_backup_dir }}/x-ui.db.bak-{{ ansible_facts['date_time']['iso8601_basic_short'] }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when:
+    - xui_db.stat.exists
+    - not ansible_check_mode
+
+- name: Stop 3x-ui before forced database restore
+  ansible.builtin.command: docker compose down
+  args:
+    chdir: "{{ xui_compose_dir }}"
+  changed_when: true
+  when:
+    - xui_restore_db_enabled | default(false) | bool
+    - xui_restore_db_force | default(false) | bool
+    - xui_db.stat.exists
+    - xui_compose_file.stat.exists
+    - not ansible_check_mode
+
+- name: Restore 3x-ui database from local backup
+  ansible.builtin.copy:
+    src: "{{ xui_restore_db_local_path }}"
+    dest: "{{ xui_db_dir }}/x-ui.db"
+    owner: root
+    group: root
+    mode: "0600"
+  register: xui_restore_db_copy
+  when:
+    - xui_restore_db_enabled | default(false) | bool
+    - not ansible_check_mode
+
+- name: Backup existing docker-compose file
+  ansible.builtin.copy:
+    src: "{{ xui_compose_dir }}/docker-compose.yml"
+    dest: "{{ xui_backup_dir }}/docker-compose.yml.bak-{{ ansible_facts['date_time']['iso8601_basic_short'] }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: preserve
+  when:
+    - xui_compose_file.stat.exists
+    - not ansible_check_mode
+
+# Validate the CANDIDATE compose (the new render), not whatever file is already
+# on disk, and do it even under --check so a broken template is caught before we
+# touch the live compose file. Only skipped when the docker CLI is not present
+# yet (e.g. --check on a not-yet-provisioned host).
+- name: Create temp file for candidate compose validation
+  ansible.builtin.tempfile:
+    state: file
+    suffix: .yml
+  register: xui_compose_tmp
+  changed_when: false
+  check_mode: false
+
+- name: Render candidate 3x-ui compose for validation
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ xui_compose_tmp.path }}"
+    mode: "0644"
+  changed_when: false
+  check_mode: false
+
+- name: Detect docker compose CLI availability
+  ansible.builtin.command: docker compose version
+  register: xui_compose_cli
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Validate candidate 3x-ui compose file
+  ansible.builtin.command: "docker compose -f {{ xui_compose_tmp.path }} config --quiet"
+  changed_when: false
+  check_mode: false
+  when: xui_compose_cli.rc == 0
+
+- name: Remove candidate compose temp file
+  ansible.builtin.file:
+    path: "{{ xui_compose_tmp.path }}"
+    state: absent
+  changed_when: false
+  check_mode: false
+
+- name: Render 3x-ui docker-compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ xui_compose_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  register: xui_compose_render
+
+- name: Pull 3x-ui image
+  ansible.builtin.command: docker compose pull
+  args:
+    chdir: "{{ xui_compose_dir }}"
+  register: xui_pull
+  changed_when: >
+    'Downloaded' in (xui_pull.stdout + xui_pull.stderr)
+    or 'Pull complete' in (xui_pull.stdout + xui_pull.stderr)
+    or 'newer image' in (xui_pull.stdout + xui_pull.stderr)
+  when:
+    - not ansible_check_mode
+
+- name: Apply 3x-ui compose
+  ansible.builtin.command: docker compose up -d --remove-orphans
+  args:
+    chdir: "{{ xui_compose_dir }}"
+  register: xui_compose_up
+  changed_when: >
+    xui_compose_render.changed
+    or 'Creating' in (xui_compose_up.stdout + xui_compose_up.stderr)
+    or 'Recreating' in (xui_compose_up.stdout + xui_compose_up.stderr)
+    or 'Starting' in (xui_compose_up.stdout + xui_compose_up.stderr)
+    or 'Started' in (xui_compose_up.stdout + xui_compose_up.stderr)
+  when:
+    - not ansible_check_mode
+
+- name: Wait for 3x-ui panel port locally
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ panel_port }}"
+    timeout: 30
+  when: not ansible_check_mode
+
+- name: Wait for 3x-ui database file
+  ansible.builtin.wait_for:
+    path: "{{ xui_db_dir }}/x-ui.db"
+    timeout: 30
+  when: not ansible_check_mode
+
+- name: Check 3x-ui database after container start
+  ansible.builtin.stat:
+    path: "{{ xui_db_dir }}/x-ui.db"
+  register: xui_db
+
+- name: Wait for 3x-ui database schema
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import sqlite3, sys
+        conn = sqlite3.connect(sys.argv[1])
+        cur = conn.cursor()
+        required = {"settings", "inbounds"}
+        found = {r[0] for r in cur.execute("select name from sqlite_master where type = 'table'")}
+        missing = required - found
+        if missing:
+            raise SystemExit("missing tables: " + ",".join(sorted(missing)))
+      - "{{ xui_db_dir }}/x-ui.db"
+  register: xui_schema_check
+  changed_when: false
+  retries: 30
+  delay: 1
+  until: xui_schema_check.rc == 0
+  when:
+    - xui_db.stat.exists
+    - not ansible_check_mode
+
+- name: Restrict existing 3x-ui database permissions
+  ansible.builtin.file:
+    path: "{{ xui_db_dir }}/x-ui.db"
+    owner: root
+    group: root
+    mode: "0600"
+  when: xui_db.stat.exists
+
+- name: Restrict 3x-ui panel listen address
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import sqlite3, sys
+        db_path, listen = sys.argv[1], sys.argv[2]
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        row = cur.execute("select value from settings where key = 'webListen'").fetchone()
+        current = row[0] if row else None
+        if current != listen:
+            if row:
+                cur.execute("update settings set value = ? where key = 'webListen'", (listen,))
+            else:
+                cur.execute("insert into settings(key, value) values('webListen', ?)", (listen,))
+            conn.commit()
+            print("changed")
+        else:
+            print("ok")
+        conn.close()
+      - "{{ xui_db_dir }}/x-ui.db"
+      - "{{ xui_panel_listen }}"
+  register: xui_panel_listen_update
+  changed_when: "'changed' in xui_panel_listen_update.stdout"
+  when:
+    - xui_db.stat.exists
+    - xui_panel_listen | length > 0
+    - not ansible_check_mode
+  tags: [panel]
+
+- name: Configure 3x-ui subscription server
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import sqlite3, sys
+        db_path, enabled, listen, path, uri, encrypt, show_info = sys.argv[1:8]
+        values = {"subEnable": enabled}
+        if enabled == "true":
+            values.update({
+                "subListen": listen,
+                "subEncrypt": encrypt,
+                "subShowInfo": show_info,
+            })
+            if path:
+                values["subPath"] = path
+            if uri:
+                values["subURI"] = uri
+        else:
+            values["subListen"] = "127.0.0.1"
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        changed = False
+        for key, value in values.items():
+            row = cur.execute("select value from settings where key = ?", (key,)).fetchone()
+            current = row[0] if row else None
+            if current != value:
+                if row:
+                    cur.execute("update settings set value = ? where key = ?", (value, key))
+                else:
+                    cur.execute("insert into settings(key, value) values(?, ?)", (key, value))
+                changed = True
+        if changed:
+            conn.commit()
+            print("changed")
+        else:
+            print("ok")
+        conn.close()
+      - "{{ xui_db_dir }}/x-ui.db"
+      - "{{ xui_subscription_enabled | bool | ternary('true', 'false') }}"
+      - "{{ xui_subscription_listen | default('') }}"
+      - "{{ xui_subscription_path | default('') }}"
+      - "{{ xui_subscription_uri | default('') }}"
+      - "{{ xui_subscription_encrypt | default(true) | bool | ternary('true', 'false') }}"
+      - "{{ xui_subscription_show_info | default(false) | bool | ternary('true', 'false') }}"
+  register: xui_subscription_update
+  changed_when: "'changed' in xui_subscription_update.stdout"
+  when:
+    - xui_db.stat.exists
+    - xui_subscription_enabled is defined
+    - not ansible_check_mode
+
+- name: Configure 3x-ui REALITY inbound overrides
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import json, sqlite3, sys
+        db_path, overrides_json = sys.argv[1], sys.argv[2]
+        overrides = json.loads(overrides_json)
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        changed = False
+        for override in overrides:
+            port = int(override["port"])
+            row = cur.execute("select stream_settings, sniffing from inbounds where port = ?", (port,)).fetchone()
+            if not row:
+                continue
+            stream = json.loads(row[0] or "{}")
+            sniffing = json.loads(row[1] or "{}")
+            reality = stream.setdefault("realitySettings", {})
+            row_changed = False
+            if override.get("target") and reality.get("target") != override["target"]:
+                reality["target"] = override["target"]
+                reality.pop("dest", None)
+                row_changed = True
+            if override.get("server_names") and reality.get("serverNames") != override["server_names"]:
+                reality["serverNames"] = override["server_names"]
+                row_changed = True
+            if override.get("fingerprint"):
+                settings = reality.setdefault("settings", {})
+                if settings.get("fingerprint") != override["fingerprint"]:
+                    settings["fingerprint"] = override["fingerprint"]
+                    row_changed = True
+            if "sniffing_enabled" in override and sniffing.get("enabled") != override["sniffing_enabled"]:
+                sniffing["enabled"] = override["sniffing_enabled"]
+                row_changed = True
+            if "sniffing_dest_override" in override and sniffing.get("destOverride") != override["sniffing_dest_override"]:
+                sniffing["destOverride"] = override["sniffing_dest_override"]
+                row_changed = True
+            if "sniffing_metadata_only" in override and sniffing.get("metadataOnly") != override["sniffing_metadata_only"]:
+                sniffing["metadataOnly"] = override["sniffing_metadata_only"]
+                row_changed = True
+            if "sniffing_route_only" in override and sniffing.get("routeOnly") != override["sniffing_route_only"]:
+                sniffing["routeOnly"] = override["sniffing_route_only"]
+                row_changed = True
+            if row_changed:
+                cur.execute(
+                    "update inbounds set stream_settings = ?, sniffing = ? where port = ?",
+                    (
+                        json.dumps(stream, separators=(",", ":")),
+                        json.dumps(sniffing, separators=(",", ":")),
+                        port,
+                    ),
+                )
+                changed = True
+        if changed:
+            conn.commit()
+            print("changed")
+        else:
+            print("ok")
+        conn.close()
+      - "{{ xui_db_dir }}/x-ui.db"
+      - "{{ xui_reality_overrides | default([]) | to_json }}"
+  register: xui_reality_update
+  changed_when: "'changed' in xui_reality_update.stdout"
+  when:
+    - xui_db.stat.exists
+    - xui_reality_overrides | default([]) | length > 0
+    - not ansible_check_mode
+
+- name: Restart 3x-ui after database setting changes
+  ansible.builtin.command: "docker restart {{ xui_container_name }}"
+  changed_when: true
+  when:
+    - >
+      (xui_panel_listen_update is defined and xui_panel_listen_update.changed)
+      or (xui_subscription_update is defined and xui_subscription_update.changed)
+      or (xui_reality_update is defined and xui_reality_update.changed)
+    - not ansible_check_mode
+  register: xui_database_restart
+  tags: [panel]
+
+- name: Wait for 3x-ui panel port after database setting changes
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ panel_port }}"
+    timeout: 30
+  when:
+    - xui_database_restart is defined
+    - xui_database_restart.changed
+    - not ansible_check_mode

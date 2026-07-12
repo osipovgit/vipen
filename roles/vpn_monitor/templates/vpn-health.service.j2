@@ -1,0 +1,10 @@
+[Unit]
+Description=VPN health check
+Wants=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ vpn_monitor_script_path }}
+StandardOutput=null
+StandardError=journal

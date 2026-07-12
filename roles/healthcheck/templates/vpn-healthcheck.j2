@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+set -u
+
+container="{{ healthcheck_container_name }}"
+timer="{{ healthcheck_monitor_timer_name }}"
+monitor_script="{{ healthcheck_monitor_script_path }}"
+report="{{ healthcheck_report_path }}"
+journal_since="{{ healthcheck_since }}"
+docker_since="{{ healthcheck_docker_since }}"
+
+mkdir -p "$(dirname "$report")"
+exec > >(tee "$report") 2>&1
+
+failed=0
+
+section() {
+  printf '\n===== %s =====\n' "$1"
+}
+
+fail() {
+  failed=1
+  printf 'FAIL: %s\n' "$1"
+}
+
+ok() {
+  printf 'OK: %s\n' "$1"
+}
+
+section "summary"
+printf 'time=%s\n' "$(date -Is)"
+printf 'journal_since=%s docker_since=%s\n' "$journal_since" "$docker_since"
+
+section "monitor script"
+if [ ! -x "$monitor_script" ]; then
+  fail "monitor script is missing or not executable: $monitor_script"
+else
+  # Diagnostic mode: never mutate the failure counter or restart the container.
+  if "$monitor_script" --no-restart; then
+    ok "monitor script returned OK"
+  else
+    fail "monitor script returned non-zero"
+  fi
+fi
+
+section "systemd timer"
+if systemctl is-active --quiet "$timer"; then
+  ok "$timer is active"
+else
+  fail "$timer is not active"
+fi
+systemctl list-timers "$timer" --no-pager || true
+
+section "failed units"
+failed_units="$(systemctl --failed --no-legend --plain 2>/dev/null || true)"
+if [ -n "$failed_units" ]; then
+  printf '%s\n' "$failed_units"
+  fail "systemd has failed units"
+else
+  ok "no failed systemd units"
+fi
+
+section "container state"
+if ! command -v docker >/dev/null 2>&1; then
+  fail "docker command is missing"
+else
+  inspect="$(docker inspect -f 'running={{ "{{" }}.State.Running{{ "}}" }} oom={{ "{{" }}.State.OOMKilled{{ "}}" }} exit={{ "{{" }}.State.ExitCode{{ "}}" }} restarts={{ "{{" }}.RestartCount{{ "}}" }} started={{ "{{" }}.State.StartedAt{{ "}}" }}' "$container" 2>/dev/null || true)"
+  if [ -z "$inspect" ]; then
+    fail "container $container not found"
+  else
+    printf '%s\n' "$inspect"
+    printf '%s\n' "$inspect" | grep -q 'running=true' || fail "container is not running"
+    printf '%s\n' "$inspect" | grep -q 'oom=true' && fail "container was OOM-killed"
+  fi
+fi
+
+section "recent vpn-health"
+vpn_health_logs="$(journalctl -t vpn-health --since "$journal_since" --no-pager 2>/dev/null || true)"
+if [ -z "$vpn_health_logs" ]; then
+  fail "no vpn-health log entries in selected window"
+else
+  printf '%s\n' "$vpn_health_logs" | tail -20
+  if printf '%s\n' "$vpn_health_logs" | grep -Eq 'status=(WARN|FAIL)'; then
+    fail "recent vpn-health contains WARN or FAIL"
+  fi
+fi
+
+section "recent critical service logs"
+critical_regex='panic|fatal|segfault|oom|out of memory|no space left on device|address already in use|permission denied|cannot allocate memory'
+service_logs="$(
+  {
+    journalctl -u docker -u containerd -u vpn-health.service --since "$journal_since" --no-pager 2>/dev/null
+    docker logs --since "$docker_since" --tail 500 "$container" 2>&1
+  } | grep -Ei "$critical_regex" | grep -Eiv 'failed login|securecookie|syslog backend disabled' || true
+)"
+if [ -n "$service_logs" ]; then
+  printf '%s\n' "$service_logs" | tail -80
+  fail "recent service/container logs contain critical patterns"
+else
+  ok "no recent critical service/container patterns"
+fi
+
+section "recent kernel critical logs"
+kernel_logs="$(journalctl -k --since "$journal_since" --no-pager 2>/dev/null | grep -Ei "$critical_regex|blocked for more than|hung task|i/o error|link is down|nf_conntrack.*table full|clocksource: long readout interval|workqueue: .* hogged cpu" || true)"
+if [ -n "$kernel_logs" ]; then
+  printf '%s\n' "$kernel_logs" | tail -80
+  fail "recent kernel logs contain critical patterns"
+else
+  ok "no recent critical kernel patterns"
+fi
+
+section "recent VPS host anomalies"
+host_logs="$(journalctl -t vps-host-monitor --since "$journal_since" --no-pager 2>/dev/null | grep 'status=WARN' || true)"
+if [ -n "$host_logs" ]; then
+  printf '%s\n' "$host_logs" | tail -80
+  fail "recent VPS host monitor contains WARN"
+else
+  ok "no recent hypervisor delay or CPU steal anomalies"
+fi
+
+section "latest resources"
+df -hT /
+free -h
+ss -s
+
+section "result"
+if [ "$failed" -eq 0 ]; then
+  printf 'HEALTHCHECK OK\n'
+  exit 0
+fi
+
+printf 'HEALTHCHECK FAILED report=%s\n' "$report"
+exit 1

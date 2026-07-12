@@ -1,0 +1,96 @@
+---
+- name: Reset UFW
+  ansible.builtin.command: ufw --force reset
+  changed_when: true
+  when:
+    - firewall_reset | bool
+    - not ansible_check_mode
+
+- name: Deny incoming by default
+  ansible.builtin.command: ufw default deny incoming
+  register: ufw_deny
+  changed_when: "'Default incoming policy changed' in ufw_deny.stdout"
+  when: not ansible_check_mode
+
+- name: Allow outgoing by default
+  ansible.builtin.command: ufw default allow outgoing
+  register: ufw_allow_out
+  changed_when: "'Default outgoing policy changed' in ufw_allow_out.stdout"
+  when: not ansible_check_mode
+
+- name: Allow SSH
+  ansible.builtin.command: "ufw allow from {{ item }} to any port {{ ssh_port }} proto tcp comment ssh"
+  loop: "{{ ssh_admin_cidrs }}"
+  register: ufw_ssh
+  changed_when: "'Rule added' in ufw_ssh.stdout"
+  when: not ansible_check_mode
+
+- name: Allow VPN TCP ports
+  ansible.builtin.command: "ufw allow {{ item }}/tcp comment vpn"
+  loop: "{{ vpn_tcp_ports }}"
+  register: ufw_tcp
+  changed_when: "'Rule added' in ufw_tcp.stdout"
+  when: not ansible_check_mode
+
+- name: Allow VPN UDP ports
+  ansible.builtin.command: "ufw allow {{ item }}/udp comment vpn"
+  loop: "{{ vpn_udp_ports }}"
+  register: ufw_udp
+  changed_when: "'Rule added' in ufw_udp.stdout"
+  when: not ansible_check_mode
+
+- name: Allow panel publicly only when explicitly enabled
+  ansible.builtin.command: "ufw allow {{ panel_port }}/tcp comment xui-panel"
+  register: ufw_panel
+  changed_when: "'Rule added' in ufw_panel.stdout"
+  when:
+    - panel_public | bool
+    - not ansible_check_mode
+
+- name: Deny panel port when not public
+  ansible.builtin.command: "ufw deny {{ panel_port }}/tcp comment xui-panel"
+  register: ufw_panel_deny
+  changed_when: "'Rule added' in ufw_panel_deny.stdout"
+  when:
+    - not panel_public | bool
+    - not ansible_check_mode
+
+- name: Enable UFW
+  ansible.builtin.command: ufw --force enable
+  register: ufw_enable
+  changed_when: "'Firewall is active' in ufw_enable.stdout"
+  when: not ansible_check_mode
+
+- name: Configure fail2ban sshd jail
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.d/sshd.local
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [sshd]
+      enabled = true
+      port = {{ ssh_port }}
+      filter = sshd
+      backend = systemd
+      maxretry = 5
+      findtime = 10m
+      bantime = 1h
+      banaction = ufw
+      banaction_allports = ufw
+  register: fail2ban_jail
+
+- name: Enable and start fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+
+- name: Restart fail2ban after jail changes or firewall reset
+  ansible.builtin.service:
+    name: fail2ban
+    state: restarted
+  when:
+    - fail2ban_jail.changed or firewall_reset | bool
+    - not ansible_check_mode

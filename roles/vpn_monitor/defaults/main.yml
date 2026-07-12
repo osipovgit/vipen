@@ -1,0 +1,21 @@
+---
+vpn_monitor_enabled: true
+vpn_monitor_interval: 1min
+vpn_monitor_script_path: /usr/local/sbin/vpn-health-check
+vpn_monitor_container_name: 3xui_app
+vpn_monitor_panel_host: 127.0.0.1
+vpn_monitor_panel_port: 55555
+vpn_monitor_tcp_ports:
+  - 443
+vpn_monitor_disk_warn_percent: 85
+vpn_monitor_disk_fail_percent: 95
+vpn_monitor_mem_warn_mb: 128
+vpn_monitor_conntrack_warn_percent: 75
+vpn_monitor_auto_restart: false
+vpn_monitor_failure_threshold: 3
+vps_host_monitor_enabled: true
+vps_host_monitor_script_path: /usr/local/sbin/vps-host-monitor
+vps_host_monitor_interval_seconds: 5
+vps_host_monitor_steal_warn_percent: 5
+vps_host_monitor_delay_warn_ms: 1000
+vps_host_monitor_summary_seconds: 3600

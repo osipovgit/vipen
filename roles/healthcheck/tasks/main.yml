@@ -1,0 +1,25 @@
+---
+- name: Install VPN healthcheck diagnostic script
+  ansible.builtin.template:
+    src: vpn-healthcheck.j2
+    dest: "{{ healthcheck_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: healthcheck_enabled | bool
+
+- name: Run VPN healthcheck diagnostics
+  ansible.builtin.command: "{{ healthcheck_script_path }}"
+  register: healthcheck_result
+  changed_when: false
+  when:
+    - healthcheck_enabled | bool
+    - not ansible_check_mode
+
+- name: Show VPN healthcheck diagnostics
+  ansible.builtin.debug:
+    msg: "{{ healthcheck_result.stdout_lines }}"
+  when:
+    - healthcheck_enabled | bool
+    - healthcheck_result is defined
+    - not ansible_check_mode

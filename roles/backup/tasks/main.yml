@@ -1,0 +1,138 @@
+---
+- name: Check 3x-ui database before backup
+  ansible.builtin.stat:
+    path: "{{ xui_db_dir }}/x-ui.db"
+  register: backup_xui_db
+
+- name: Ensure server-side backup directory exists
+  ansible.builtin.file:
+    path: "{{ xui_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when:
+    - backup_xui_db.stat.exists
+    - not ansible_check_mode
+
+# A live file copy of an open SQLite DB (WAL/journal) can be inconsistent. Use
+# the SQLite online backup API to get a consistent snapshot and verify it with
+# PRAGMA integrity_check before it leaves the box. No DB content is printed.
+- name: Create consistent, integrity-checked SQLite snapshot
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import sqlite3, sys
+        src, dst = sys.argv[1], sys.argv[2]
+        source = sqlite3.connect("file:%s?mode=ro" % src, uri=True, timeout=30)
+        dest = sqlite3.connect(dst)
+        try:
+            with dest:
+                source.backup(dest)
+            result = dest.execute("pragma integrity_check").fetchone()
+        finally:
+            source.close()
+            dest.close()
+        status = result[0] if result else "unknown"
+        if status != "ok":
+            sys.stderr.write("integrity_check=%s\n" % status)
+            raise SystemExit(2)
+        print("integrity_check=ok")
+      - "{{ xui_db_dir }}/x-ui.db"
+      - "{{ backup_snapshot_path }}"
+  register: backup_snapshot
+  changed_when: true
+  when:
+    - backup_xui_db.stat.exists
+    - not ansible_check_mode
+
+- name: Restrict snapshot permissions
+  ansible.builtin.file:
+    path: "{{ backup_snapshot_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when:
+    - backup_xui_db.stat.exists
+    - not ansible_check_mode
+
+# ---------------------------------------------------------------------------
+# Remote run (Ansible on another machine): pull the verified snapshot OFF-HOST
+# to the control node, then drop the server-side snapshot (no extra on-server
+# copy, matching the original off-host behaviour).
+# ---------------------------------------------------------------------------
+- name: Create local off-host backup directory
+  ansible.builtin.file:
+    path: "{{ backup_local_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  when:
+    - not run_is_local | bool
+    - backup_xui_db.stat.exists
+    - not ansible_check_mode
+
+- name: Fetch verified snapshot off-host
+  ansible.builtin.fetch:
+    src: "{{ backup_snapshot_path }}"
+    dest: "{{ backup_local_dir }}/x-ui.db"
+    flat: true
+  when:
+    - not run_is_local | bool
+    - backup_xui_db.stat.exists
+    - not ansible_check_mode
+
+- name: Restrict local database backup permissions
+  ansible.builtin.file:
+    path: "{{ backup_local_dir }}/x-ui.db"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when:
+    - not run_is_local | bool
+    - backup_xui_db.stat.exists
+    - not ansible_check_mode
+
+- name: Store remote backup metadata locally
+  ansible.builtin.copy:
+    dest: "{{ backup_local_dir }}/README.txt"
+    mode: "0600"
+    content: |
+      Host: {{ inventory_hostname }}
+      Source: {{ xui_db_dir }}/x-ui.db
+      Created: {{ ansible_facts['date_time']['iso8601'] }}
+      Method: sqlite3 online backup + integrity_check
+      Sensitive: this database contains VPN clients, UUIDs, passwords, and panel settings.
+  delegate_to: localhost
+  become: false
+  when:
+    - not run_is_local | bool
+    - backup_xui_db.stat.exists
+    - not ansible_check_mode
+
+- name: Remove server-side snapshot after off-host fetch
+  ansible.builtin.file:
+    path: "{{ backup_snapshot_path }}"
+    state: absent
+  when:
+    - not run_is_local | bool
+    - backup_xui_db.stat.exists
+    - not ansible_check_mode
+
+# ---------------------------------------------------------------------------
+# Local run (Ansible on the server itself): control node == target, so an
+# off-host copy is impossible. The verified snapshot stays on the server.
+# NOTE: same disk, this is NOT off-host protection.
+# ---------------------------------------------------------------------------
+- name: Warn that a local run is not an off-host backup
+  ansible.builtin.debug:
+    msg: >-
+      Local run: consistent on-host DB snapshot written to {{ backup_snapshot_path }}.
+      This is on the same disk and is NOT an off-host backup;
+      copy it to another machine for real protection.
+  when:
+    - run_is_local | bool
+    - backup_xui_db.stat.exists

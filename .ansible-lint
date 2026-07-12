@@ -1,0 +1,8 @@
+---
+# Raise the profile later (basic -> moderate) as the codebase adopts more rules.
+profile: min
+
+exclude_paths:
+  - .github/
+  - backups/
+  - .ansible/

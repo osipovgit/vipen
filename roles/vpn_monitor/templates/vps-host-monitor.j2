@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -u
+
+interval={{ vps_host_monitor_interval_seconds }}
+steal_warn_bps=$(({{ vps_host_monitor_steal_warn_percent }} * 100))
+delay_warn_ms={{ vps_host_monitor_delay_warn_ms }}
+summary_seconds={{ vps_host_monitor_summary_seconds }}
+
+read_cpu() {
+  read -r _ user nice system idle iowait irq softirq steal _ < /proc/stat
+  cpu_total=$((user + nice + system + idle + iowait + irq + softirq + steal))
+  cpu_steal=$steal
+}
+
+uptime_ms() {
+  awk '{printf "%.0f\n", $1 * 1000}' /proc/uptime
+}
+
+format_bps() {
+  printf '%d.%02d' "$(($1 / 100))" "$(($1 % 100))"
+}
+
+read_cpu
+previous_total=$cpu_total
+previous_steal=$cpu_steal
+previous_uptime_ms="$(uptime_ms)"
+next_summary=$(( $(date +%s) + summary_seconds ))
+max_steal_bps=0
+max_delay_ms=0
+anomalies=0
+
+logger -t vps-host-monitor "status=START interval_seconds=${interval} steal_warn_percent={{ vps_host_monitor_steal_warn_percent }} delay_warn_ms=${delay_warn_ms}"
+
+while sleep "$interval"; do
+  current_uptime_ms="$(uptime_ms)"
+  elapsed_ms=$((current_uptime_ms - previous_uptime_ms))
+  delay_ms=$((elapsed_ms - interval * 1000))
+  [ "$delay_ms" -lt 0 ] && delay_ms=0
+
+  read_cpu
+  total_delta=$((cpu_total - previous_total))
+  steal_delta=$((cpu_steal - previous_steal))
+  steal_bps=0
+  [ "$total_delta" -gt 0 ] && steal_bps=$((steal_delta * 10000 / total_delta))
+
+  [ "$steal_bps" -gt "$max_steal_bps" ] && max_steal_bps=$steal_bps
+  [ "$delay_ms" -gt "$max_delay_ms" ] && max_delay_ms=$delay_ms
+
+  if [ "$steal_bps" -ge "$steal_warn_bps" ] || [ "$delay_ms" -ge "$delay_warn_ms" ]; then
+    anomalies=$((anomalies + 1))
+    load1="$(awk '{print $1}' /proc/loadavg)"
+    logger -p daemon.warning -t vps-host-monitor \
+      "status=WARN sample_ms=${elapsed_ms} scheduler_delay_ms=${delay_ms} cpu_steal_pct=$(format_bps "$steal_bps") load1=${load1}"
+  fi
+
+  now="$(date +%s)"
+  if [ "$now" -ge "$next_summary" ]; then
+    logger -t vps-host-monitor \
+      "status=SUMMARY period_seconds=${summary_seconds} max_scheduler_delay_ms=${max_delay_ms} max_cpu_steal_pct=$(format_bps "$max_steal_bps") anomalies=${anomalies}"
+    next_summary=$((now + summary_seconds))
+    max_steal_bps=0
+    max_delay_ms=0
+    anomalies=0
+  fi
+
+  previous_total=$cpu_total
+  previous_steal=$cpu_steal
+  previous_uptime_ms=$current_uptime_ms
+done

@@ -1,0 +1,130 @@
+---
+- name: Read available TCP congestion controls
+  ansible.builtin.command: sysctl -n net.ipv4.tcp_available_congestion_control
+  register: vpn_tcp_available_congestion_control
+  changed_when: false
+  when:
+    - vpn_sysctl_tuning_enabled | bool
+    - vpn_sysctl_settings['net.ipv4.tcp_congestion_control'] is defined
+    - not ansible_check_mode
+
+- name: Verify requested TCP congestion control is available
+  ansible.builtin.assert:
+    that:
+      - vpn_sysctl_settings['net.ipv4.tcp_congestion_control'] in vpn_tcp_available_congestion_control.stdout.split()
+    fail_msg: "Requested TCP congestion control is not available on this kernel."
+  when:
+    - vpn_sysctl_tuning_enabled | bool
+    - vpn_sysctl_settings['net.ipv4.tcp_congestion_control'] is defined
+    - not ansible_check_mode
+
+- name: Load nf_conntrack on boot when conntrack tuning is enabled
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/nf_conntrack.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: "nf_conntrack\n"
+  when:
+    - vpn_sysctl_tuning_enabled | bool
+    - vpn_sysctl_settings['net.netfilter.nf_conntrack_max'] is defined
+
+- name: Load nf_conntrack now when conntrack tuning is enabled
+  ansible.builtin.command: modprobe nf_conntrack
+  changed_when: false
+  when:
+    - vpn_sysctl_tuning_enabled | bool
+    - vpn_sysctl_settings['net.netfilter.nf_conntrack_max'] is defined
+    - not ansible_check_mode
+
+- name: Configure VPN network sysctl tuning
+  ansible.builtin.template:
+    src: 99-vpn-performance.conf.j2
+    dest: /etc/sysctl.d/99-vpn-performance.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: vpn_sysctl_config
+  when: vpn_sysctl_tuning_enabled | bool
+
+- name: Apply effective VPN network sysctl tuning
+  ansible.builtin.command: "sysctl -w {{ item.key }}={{ item.value }}"
+  loop: "{{ vpn_sysctl_settings | dict2items }}"
+  changed_when: false
+  when:
+    - vpn_sysctl_tuning_enabled | bool
+    - not ansible_check_mode
+
+- name: Read effective VPN network sysctl tuning
+  ansible.builtin.command: "sysctl -n {{ item.key }}"
+  loop: "{{ vpn_sysctl_settings | dict2items }}"
+  register: vpn_sysctl_effective
+  changed_when: false
+  when:
+    - vpn_sysctl_tuning_enabled | bool
+    - not ansible_check_mode
+
+- name: Verify effective VPN network sysctl tuning
+  ansible.builtin.assert:
+    that:
+      - item.stdout == item.item.value
+    fail_msg: "{{ item.item.key }} is {{ item.stdout }}, expected {{ item.item.value }}"
+  loop: "{{ vpn_sysctl_effective.results | default([]) }}"
+  when:
+    - vpn_sysctl_tuning_enabled | bool
+    - not ansible_check_mode
+
+- name: Detect default route interface
+  ansible.builtin.shell: |
+    set -o pipefail
+    ip -o route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}'
+  args:
+    executable: /bin/bash
+  register: vpn_default_route_interface
+  changed_when: false
+  when:
+    - vpn_sysctl_tuning_enabled | bool
+    - vpn_apply_qdisc_to_default_route | bool
+    - vpn_sysctl_settings['net.core.default_qdisc'] is defined
+    - vpn_sysctl_settings['net.core.default_qdisc'] == 'fq'
+    - not ansible_check_mode
+
+- name: Read active qdisc on default route interface
+  ansible.builtin.command: "tc qdisc show dev {{ vpn_default_route_interface.stdout }} root"
+  register: vpn_default_route_qdisc
+  changed_when: false
+  when:
+    - vpn_sysctl_tuning_enabled | bool
+    - vpn_apply_qdisc_to_default_route | bool
+    - vpn_default_route_interface.stdout | default('') | length > 0
+    - not ansible_check_mode
+
+- name: Apply fq qdisc to default route interface
+  ansible.builtin.command: "tc qdisc replace dev {{ vpn_default_route_interface.stdout }} root fq"
+  when:
+    - vpn_sysctl_tuning_enabled | bool
+    - vpn_apply_qdisc_to_default_route | bool
+    - vpn_default_route_interface.stdout | default('') | length > 0
+    - vpn_default_route_qdisc.stdout | default('') is not match('^qdisc fq ')
+    - not ansible_check_mode
+
+- name: Verify active qdisc on default route interface
+  ansible.builtin.command: "tc qdisc show dev {{ vpn_default_route_interface.stdout }} root"
+  register: vpn_default_route_qdisc_after
+  changed_when: false
+  when:
+    - vpn_sysctl_tuning_enabled | bool
+    - vpn_apply_qdisc_to_default_route | bool
+    - vpn_default_route_interface.stdout | default('') | length > 0
+    - not ansible_check_mode
+
+- name: Assert active fq qdisc on default route interface
+  ansible.builtin.assert:
+    that:
+      - vpn_default_route_qdisc_after.stdout is match('^qdisc fq ')
+    fail_msg: "Default route qdisc is {{ vpn_default_route_qdisc_after.stdout }}, expected fq."
+  when:
+    - vpn_sysctl_tuning_enabled | bool
+    - vpn_apply_qdisc_to_default_route | bool
+    - vpn_default_route_interface.stdout | default('') | length > 0
+    - not ansible_check_mode

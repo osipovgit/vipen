@@ -1,0 +1,25 @@
+---
+# Inventory for running Ansible ON the server itself (control node == target).
+#   cp hosts.local.example.yml hosts.local.yml
+#   ansible-playbook -i inventories/production/hosts.local.yml site.yml
+#
+# Unlike hosts.yml there is no IP or SSH key: the connection is local, so
+# Ansible executes tasks directly on this machine. Run it as root (or a sudo
+# user) on the VPS with ansible-core and python3 installed.
+all:
+  children:
+    vpn_servers:
+      hosts:
+        # Keep the SAME logical name as in hosts.yml so inventory_hostname and
+        # backup paths stay consistent between local and remote runs.
+        vipen:
+          ansible_connection: local
+          ansible_python_interpreter: /usr/bin/python3
+          # IMPORTANT for a local run: the ssh role disables password auth, so
+          # you need a working key for remote SSH afterwards. Generate the pair
+          # on YOUR machine (not here):
+          #   ssh-keygen -t ed25519 -f ~/.ssh/vipen
+          # then paste the contents of ~/.ssh/vipen.pub below. Without it the
+          # role stops before disabling password auth (ssh_require_authorized_key).
+          # ssh_authorized_keys:
+          #   - "ssh-ed25519 AAAA...your-public-key... you@laptop"

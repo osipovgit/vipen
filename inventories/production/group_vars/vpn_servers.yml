@@ -1,0 +1,192 @@
+---
+# =============================================================================
+#  CENTRAL CONFIGURATION for the 3x-ui VPN server
+# =============================================================================
+#  This is the single file you edit to configure the whole setup. Connection
+#  details (IP, SSH user, key) live in the inventory: inventories/production/hosts.yml
+#
+#  When moving to a new server you normally only touch:
+#    - hosts.yml            -> ansible_host / ssh key
+#    - vpn_tcp_ports        -> public VPN ports
+#    - xui_image            -> 3x-ui version
+#    - xui_restore_db_*     -> restore clients from a local backup (optional)
+#
+#  Secrets (client UUIDs, REALITY keys, subscription path/URI) are NOT stored
+#  here. They live inside x-ui.db and are preserved automatically. Leave the
+#  xui_subscription_path / xui_subscription_uri fields empty to keep the values
+#  already present in the database.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. SSH access
+# -----------------------------------------------------------------------------
+ssh_port: 22
+# CIDRs allowed to reach SSH. 0.0.0.0/0 = anywhere (handy for mobile/roaming).
+# For tighter security replace with your own IP(s), e.g. ["203.0.113.5/32"].
+ssh_admin_cidrs:
+  - 0.0.0.0/0
+# Public SSH keys authorized for root login. The ssh role installs them BEFORE
+# disabling password auth, so key-only login can't lock you out. Generate the
+# pair on YOUR machine (ssh-keygen) and paste the PUBLIC key here. Mainly needed
+# for local runs (no existing SSH session proves a key works); on remote runs it
+# can stay empty if the key is already in /root/.ssh/authorized_keys.
+ssh_authorized_keys: []
+# Safety guard: refuse to disable PasswordAuthentication if root would end up
+# with no authorized key. Set to false only if you rely on the hosting console
+# and knowingly accept losing remote SSH.
+ssh_require_authorized_key: true
+
+# -----------------------------------------------------------------------------
+# 2. Firewall (UFW) & ports
+# -----------------------------------------------------------------------------
+# firewall_reset: true means the playbook owns UFW and rebuilds rules from the
+# variables below on every run. Set to false if the host runs other services
+# with their own firewall rules.
+firewall_reset: true
+# Public VPN TCP ports. 443/8443 = VLESS/REALITY inbounds, 2096 = 3x-ui
+# subscription endpoint (see section 5, xui_subscription_enabled).
+vpn_tcp_ports: [443, 8443, 2096]
+vpn_udp_ports: []
+# 3x-ui web panel port. Kept private (see xui_panel_listen / panel_public).
+panel_port: 55555
+# false -> UFW denies the panel port from the internet (reach it via SSH tunnel).
+panel_public: false
+# Address the panel binds to inside the server. 127.0.0.1 = loopback only.
+xui_panel_listen: 127.0.0.1
+
+# -----------------------------------------------------------------------------
+# 3. Backups (off-host copy of x-ui.db to your local machine)
+# -----------------------------------------------------------------------------
+# x-ui.db contains client credentials. Backups are stored locally and are
+# gitignored. One timestamped copy is pulled on every full run.
+backup_local_dir: "{{ playbook_dir }}/../backups/{{ inventory_hostname }}/{{ ansible_facts['date_time']['iso8601_basic_short'] }}"
+# Server-side consistent snapshot (sqlite3 online backup + integrity_check) that
+# the backup role produces before fetching off-host / keeping on-host. A live
+# file copy of an open SQLite DB can be torn (WAL/journal); the snapshot is safe.
+backup_snapshot_path: "{{ xui_backup_dir }}/x-ui.db.snapshot-{{ ansible_facts['date_time']['iso8601_basic_short'] }}"
+
+# Run mode, auto-detected from the connection plugin. Do not set by hand:
+#   remote (default) -> Ansible runs from another machine over SSH (hosts.yml).
+#                       The backup role pulls an OFF-HOST copy to the control node.
+#   local            -> Ansible runs ON the server itself (hosts.local.yml sets
+#                       ansible_connection: local). Off-host is impossible, so the
+#                       backup role takes an on-host snapshot into xui_backup_dir.
+run_is_local: "{{ ansible_connection | default('ssh') == 'local' }}"
+
+# -----------------------------------------------------------------------------
+# 4. System updates & log retention
+# -----------------------------------------------------------------------------
+# Safe apt upgrade. Never reboots automatically (playbook reports if one is due).
+system_updates_enabled: true
+
+log_retention_enabled: true
+journald_system_max_use: 200M       # max size of the persistent journal
+journald_system_keep_free: 1G
+journald_system_max_file_size: 50M
+journald_runtime_max_use: 50M
+btmp_logrotate_enabled: true
+btmp_logrotate_size: 25M            # rotate failed-login log after this size
+btmp_logrotate_rotate: 1
+
+# -----------------------------------------------------------------------------
+# 5. Network tuning (TCP performance for VPN traffic)
+# -----------------------------------------------------------------------------
+vpn_sysctl_tuning_enabled: true
+vpn_sysctl_settings:
+  net.core.default_qdisc: fq                 # fair queue, pairs well with BBR
+  net.ipv4.tcp_congestion_control: bbr       # better throughput on lossy links
+  net.netfilter.nf_conntrack_max: "65536"    # avoid conntrack table overflow
+vpn_apply_qdisc_to_default_route: true       # apply fq now, without a reboot
+
+# -----------------------------------------------------------------------------
+# 6. 3x-ui container
+# -----------------------------------------------------------------------------
+xui_compose_dir: /opt/vipen                  # working dir on the server
+xui_db_dir: "{{ xui_compose_dir }}/db"
+xui_cert_dir: "{{ xui_compose_dir }}/cert"
+xui_backup_dir: "{{ xui_compose_dir }}/backups"
+xui_container_name: 3xui_app
+# Always pin an explicit version, never :latest.
+xui_image: ghcr.io/mhsanaei/3x-ui:v3.3.1
+
+# Restore clients/inbounds from a local backup onto a fresh server.
+# Set enabled: true and point _local_path at a backups/<host>/<ts>/x-ui.db file.
+xui_restore_db_enabled: false
+xui_restore_db_local_path: ""
+xui_restore_db_force: false                  # true = overwrite an existing remote db
+
+# Subscription server (2096/tcp). Path/URI are secrets kept in the database:
+# leave them empty to preserve the current values.
+xui_subscription_enabled: true
+xui_subscription_listen: ""                  # "" = all interfaces
+xui_subscription_path: ""
+xui_subscription_uri: ""
+xui_subscription_encrypt: true
+xui_subscription_show_info: false
+
+# Non-secret REALITY inbound overrides applied per port (target/SNI/fingerprint/
+# sniffing only). Keys, UUIDs and shortIds are never touched here.
+xui_reality_overrides:
+  - port: 443
+    target: www.google.com:443
+    server_names:
+      - www.google.com
+    fingerprint: randomized
+    sniffing_enabled: true
+    sniffing_dest_override:
+      - http
+      - tls
+  - port: 8443
+    target: www.icloud.com:443
+    server_names:
+      - www.icloud.com
+    fingerprint: chrome
+    sniffing_enabled: true
+    sniffing_dest_override:
+      - http
+      - tls
+
+# Linux capabilities for 3x-ui built-in IP-limit / ban features.
+xui_container_cap_add:
+  - NET_ADMIN
+  - NET_RAW
+
+# -----------------------------------------------------------------------------
+# 7. Monitoring
+# -----------------------------------------------------------------------------
+# Per-minute health check (container, panel, VPN ports, xray, disk, memory,
+# conntrack, hypervisor pause) logged to journald under tag "vpn-health".
+vpn_monitor_enabled: true
+vpn_monitor_interval: 1min
+vpn_monitor_script_path: /usr/local/sbin/vpn-health-check
+vpn_monitor_container_name: "{{ xui_container_name }}"
+vpn_monitor_panel_host: "{{ xui_panel_listen }}"
+vpn_monitor_panel_port: "{{ panel_port }}"
+vpn_monitor_tcp_ports: "{{ vpn_tcp_ports }}"
+vpn_monitor_disk_warn_percent: 85
+vpn_monitor_disk_fail_percent: 95
+vpn_monitor_mem_warn_mb: 128
+vpn_monitor_conntrack_warn_percent: 75
+# Auto-restart the container after N consecutive failed checks. Off by default.
+vpn_monitor_auto_restart: false
+vpn_monitor_failure_threshold: 3
+
+# Continuous hypervisor monitor: flags CPU steal and VM scheduling delay
+# (evidence for hosting-side problems). Logged under tag "vps-host-monitor".
+vps_host_monitor_enabled: true
+vps_host_monitor_interval_seconds: 5
+vps_host_monitor_steal_warn_percent: 5
+vps_host_monitor_delay_warn_ms: 1000
+vps_host_monitor_summary_seconds: 3600
+
+# -----------------------------------------------------------------------------
+# 8. Manual healthcheck (tag: healthcheck, not run by the default playbook)
+# -----------------------------------------------------------------------------
+healthcheck_enabled: true
+healthcheck_script_path: /usr/local/sbin/vpn-healthcheck
+healthcheck_report_path: /var/log/vpn-healthcheck-report.log
+healthcheck_since: 30 minutes ago
+healthcheck_docker_since: 30m
+healthcheck_container_name: "{{ xui_container_name }}"
+healthcheck_monitor_timer_name: vpn-health.timer
+healthcheck_monitor_script_path: "{{ vpn_monitor_script_path }}"

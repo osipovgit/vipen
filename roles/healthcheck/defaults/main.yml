@@ -1,0 +1,9 @@
+---
+healthcheck_enabled: true
+healthcheck_script_path: /usr/local/sbin/vpn-healthcheck
+healthcheck_report_path: /var/log/vpn-healthcheck-report.log
+healthcheck_since: 30 minutes ago
+healthcheck_docker_since: 30m
+healthcheck_container_name: 3xui_app
+healthcheck_monitor_timer_name: vpn-health.timer
+healthcheck_monitor_script_path: /usr/local/sbin/vpn-health-check

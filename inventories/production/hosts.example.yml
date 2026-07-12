@@ -1,0 +1,18 @@
+---
+# Copy this file to hosts.yml and fill in your own values:
+#   cp hosts.example.yml hosts.yml
+# hosts.yml is gitignored so your real IP and key path never get published.
+all:
+  children:
+    vpn_servers:
+      hosts:
+        # Logical name of the server; used in local backup paths (backups/<name>/...).
+        # Keep it the same as in hosts.local.yml so inventory_hostname stays consistent.
+        vipen:
+          # Public IP or DNS name of your VPS.
+          ansible_host: "<your-server-ip>"
+          # SSH user. Root is fine for a dedicated VPN box; key-only login is enforced.
+          ansible_user: root
+          # Path to the SSH private key used to reach this server.
+          ansible_ssh_private_key_file: ~/.ssh/vipen
+          ansible_python_interpreter: /usr/bin/python3

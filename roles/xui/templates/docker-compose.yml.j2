@@ -1,0 +1,19 @@
+services:
+  3xui:
+    image: "{{ xui_image }}"
+    container_name: "{{ xui_container_name }}"
+{% if xui_container_cap_add | length > 0 %}
+    cap_add:
+{% for cap in xui_container_cap_add %}
+      - {{ cap }}
+{% endfor %}
+{% endif %}
+    volumes:
+      - "{{ xui_db_dir }}/:/etc/x-ui/"
+      - "{{ xui_cert_dir }}/:/root/cert/"
+    environment:
+      XRAY_VMESS_AEAD_FORCED: "false"
+      XUI_ENABLE_FAIL2BAN: "true"
+    tty: true
+    network_mode: host
+    restart: unless-stopped

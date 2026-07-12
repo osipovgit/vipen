@@ -8,13 +8,17 @@ backups/
 default_ru.conf
 
 # --- Host-specific inventory (copy hosts.example.yml -> hosts.yml) ---
-ansible/inventories/production/hosts.yml
+inventories/production/hosts.yml
+# Local-run inventory (copy hosts.local.example.yml -> hosts.local.yml)
+inventories/production/hosts.local.yml
 
 # --- Ansible runtime artifacts ---
-ansible/.ansible/
+.ansible/
 *.retry
 
 # --- OS / editor noise ---
 .DS_Store
 **/.DS_Store
 *.swp
+.idea/
+.vscode/

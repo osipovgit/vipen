@@ -1,0 +1,4 @@
+# Managed by Ansible.
+{% for key, value in vpn_sysctl_settings.items() %}
+{{ key }}={{ value }}
+{% endfor %}

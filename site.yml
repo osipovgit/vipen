@@ -1,0 +1,29 @@
+---
+- name: Harden and run a 3x-ui VPN server
+  hosts: vpn_servers
+  become: true
+  gather_facts: true
+
+  roles:
+    - role: base
+      tags: [base]
+    - role: log_retention
+      tags: [logs]
+    - role: network_tuning
+      tags: [network_tuning]
+    - role: backup
+      tags: [backup]
+    - role: ssh
+      tags: [ssh]
+    - role: firewall
+      tags: [firewall]
+    - role: docker
+      tags: [docker]
+    - role: system_updates
+      tags: [updates]
+    - role: xui
+      tags: [xui]
+    - role: vpn_monitor
+      tags: [monitor]
+    - role: healthcheck
+      tags: [never, healthcheck]

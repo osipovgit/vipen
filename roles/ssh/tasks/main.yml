@@ -1,0 +1,89 @@
+---
+# ---------------------------------------------------------------------------
+# Authorized keys must exist BEFORE password auth is disabled, otherwise a run
+# (especially a local one, with no SSH session to prove a key works) can lock
+# root out of remote SSH.
+# ---------------------------------------------------------------------------
+- name: Ensure root .ssh directory exists
+  ansible.builtin.file:
+    path: /root/.ssh
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install provided authorized keys for root
+  ansible.builtin.lineinfile:
+    path: /root/.ssh/authorized_keys
+    line: "{{ item }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ ssh_authorized_keys | default([]) }}"
+  when: ssh_authorized_keys | default([]) | length > 0
+
+- name: Check that root has at least one authorized key
+  ansible.builtin.stat:
+    path: /root/.ssh/authorized_keys
+  register: ssh_root_authorized_keys
+
+- name: Refuse to disable password auth without a usable key (avoid lockout)
+  ansible.builtin.fail:
+    msg: >-
+      Root has no authorized_keys and ssh_authorized_keys is empty. Disabling
+      PasswordAuthentication now would lock out remote SSH. Add your PUBLIC key
+      via ssh_authorized_keys (group_vars or hosts.local.yml), or run ssh-copy-id
+      from your machine, then re-run. To proceed anyway (hosting console only),
+      set ssh_require_authorized_key: false.
+  when:
+    - ssh_require_authorized_key | default(true) | bool
+    - ssh_authorized_keys | default([]) | length == 0
+    - not (ssh_root_authorized_keys.stat.exists and (ssh_root_authorized_keys.stat.size | default(0)) > 0)
+
+# ---------------------------------------------------------------------------
+# sshd hardening
+# ---------------------------------------------------------------------------
+- name: Ensure sshd drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure sshd includes drop-ins
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?Include\s+/etc/ssh/sshd_config\.d/\*\.conf'
+    line: 'Include /etc/ssh/sshd_config.d/*.conf'
+    insertbefore: BOF
+
+- name: Configure SSH hardening
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/01-vpn.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      Port {{ ssh_port }}
+      PubkeyAuthentication yes
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin prohibit-password
+      MaxAuthTries 3
+      LoginGraceTime 30
+
+- name: Validate sshd config
+  ansible.builtin.command: sshd -t
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Reload sshd
+  ansible.builtin.service:
+    name: ssh
+    state: reloaded
+  when: not ansible_check_mode
+
+- name: Reset Ansible SSH connection after sshd reload
+  ansible.builtin.meta: reset_connection
