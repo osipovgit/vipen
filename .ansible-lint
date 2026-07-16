@@ -1,6 +1,5 @@
 ---
-# Raise the profile later (basic -> moderate) as the codebase adopts more rules.
-profile: min
+profile: basic
 
 exclude_paths:
   - .github/
