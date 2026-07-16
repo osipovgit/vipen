@@ -2,7 +2,7 @@
 
 # Vipen
 
-[![Lint](https://github.com/osipovgit/vipen/actions/workflows/lint.yml/badge.svg)](https://github.com/osipovgit/vipen/actions/workflows/ci.yml)
+[![CI](https://github.com/osipovgit/vipen/actions/workflows/ci.yml/badge.svg)](https://github.com/osipovgit/vipen/actions/workflows/ci.yml)
 
 Ansible pipeline that deploys [3x-ui](https://github.com/MHSanaei/3x-ui) (management panel + Xray VPN server) on a Debian/Ubuntu host.
 
