@@ -2,6 +2,8 @@
 
 # Vipen
 
+[![Lint](https://github.com/osipovgit/vipen/actions/workflows/lint.yml/badge.svg)](https://github.com/osipovgit/vipen/actions/workflows/lint.yml)
+
 Ansible-пайплайн, который на Debian/Ubuntu-хосте разворачивает [3x-ui](https://github.com/MHSanaei/3x-ui) (панель управления + VPN-сервер Xray).
 
 При этом пайплайн **не создаёт VPN-подключения и пользователей** — вы заводите их в панели вручную или восстанавливаете из бэкапа БД.
