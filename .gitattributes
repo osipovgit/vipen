@@ -1,0 +1,10 @@
+* text=auto
+
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.j2   text eol=lf
+
+*.yml  linguist-language=Ansible
+*.yaml linguist-language=Ansible
+docs/* linguist-documentation
