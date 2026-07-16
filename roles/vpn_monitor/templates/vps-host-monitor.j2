@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -u
 
-interval={{ vps_host_monitor_interval_seconds }}
-steal_warn_bps=$(({{ vps_host_monitor_steal_warn_percent }} * 100))
-delay_warn_ms={{ vps_host_monitor_delay_warn_ms }}
-summary_seconds={{ vps_host_monitor_summary_seconds }}
+interval={{ vpn_monitor_host_interval_seconds }}
+steal_warn_bps=$(({{ vpn_monitor_host_steal_warn_percent }} * 100))
+delay_warn_ms={{ vpn_monitor_host_delay_warn_ms }}
+summary_seconds={{ vpn_monitor_host_summary_seconds }}
 
 read_cpu() {
   read -r _ user nice system idle iowait irq softirq steal _ < /proc/stat
@@ -29,7 +29,7 @@ max_steal_bps=0
 max_delay_ms=0
 anomalies=0
 
-logger -t vps-host-monitor "status=START interval_seconds=${interval} steal_warn_percent={{ vps_host_monitor_steal_warn_percent }} delay_warn_ms=${delay_warn_ms}"
+logger -t vps-host-monitor "status=START interval_seconds=${interval} steal_warn_percent={{ vpn_monitor_host_steal_warn_percent }} delay_warn_ms=${delay_warn_ms}"
 
 while sleep "$interval"; do
   current_uptime_ms="$(uptime_ms)"

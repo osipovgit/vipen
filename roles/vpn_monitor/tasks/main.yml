@@ -37,12 +37,12 @@
 - name: Install VPS host monitor script
   ansible.builtin.template:
     src: vps-host-monitor.j2
-    dest: "{{ vps_host_monitor_script_path }}"
+    dest: "{{ vpn_monitor_host_script_path }}"
     owner: root
     group: root
     mode: "0755"
-  register: vps_host_monitor_script
-  when: vps_host_monitor_enabled | bool
+  register: vpn_monitor_host_script
+  when: vpn_monitor_host_enabled | bool
 
 - name: Install VPS host monitor service
   ansible.builtin.template:
@@ -51,9 +51,9 @@
     owner: root
     group: root
     mode: "0644"
-  register: vps_host_monitor_service
+  register: vpn_monitor_host_service
   notify: Reload systemd daemon
-  when: vps_host_monitor_enabled | bool
+  when: vpn_monitor_host_enabled | bool
 
 # 2. Apply all unit-file changes with a single daemon-reload before any unit is
 #    enabled or started, so systemd already knows the freshly written units.
@@ -87,8 +87,8 @@
     name: vps-host-monitor.service
     state: restarted
   when:
-    - vps_host_monitor_enabled | bool
-    - vps_host_monitor_script.changed or vps_host_monitor_service.changed
+    - vpn_monitor_host_enabled | bool
+    - vpn_monitor_host_script.changed or vpn_monitor_host_service.changed
     - not ansible_check_mode
 
 - name: Enable and start VPS host monitor
@@ -97,7 +97,7 @@
     enabled: true
     state: started
   when:
-    - vps_host_monitor_enabled | bool
+    - vpn_monitor_host_enabled | bool
     - not ansible_check_mode
 
 # 4. Diagnostic: run the health check once and surface the result.

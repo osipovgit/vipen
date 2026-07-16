@@ -15,7 +15,7 @@
     owner: root
     group: root
     mode: "0644"
-  register: journald_retention_config
+  register: log_retention_journald_retention_config
   when: log_retention_enabled | bool
 
 - name: Restart journald after retention changes
@@ -24,20 +24,20 @@
     state: restarted
   when:
     - log_retention_enabled | bool
-    - journald_retention_config.changed
+    - log_retention_journald_retention_config.changed
     - not ansible_check_mode
 
 - name: Vacuum persistent journal to configured limit
-  ansible.builtin.command: "journalctl --vacuum-size={{ journald_system_max_use }}"
-  register: journald_vacuum
-  changed_when: "'freed 0B' not in (journald_vacuum.stdout + journald_vacuum.stderr)"
+  ansible.builtin.command: "journalctl --vacuum-size={{ log_retention_journald_system_max_use }}"
+  register: log_retention_journald_vacuum
+  changed_when: "'freed 0B' not in (log_retention_journald_vacuum.stdout + log_retention_journald_vacuum.stderr)"
   when:
     - log_retention_enabled | bool
     - not ansible_check_mode
 
 - name: Report journald disk usage
   ansible.builtin.command: journalctl --disk-usage
-  register: journald_disk_usage
+  register: log_retention_journald_disk_usage
   changed_when: false
   when:
     - log_retention_enabled | bool
@@ -45,10 +45,10 @@
 
 - name: Show journald disk usage
   ansible.builtin.debug:
-    msg: "{{ journald_disk_usage.stdout }}"
+    msg: "{{ log_retention_journald_disk_usage.stdout }}"
   when:
     - log_retention_enabled | bool
-    - journald_disk_usage is defined
+    - log_retention_journald_disk_usage is defined
     - not ansible_check_mode
 
 - name: Configure btmp logrotate limits
@@ -58,11 +58,11 @@
     owner: root
     group: root
     mode: "0644"
-  when: btmp_logrotate_enabled | bool
+  when: log_retention_btmp_logrotate_enabled | bool
 
 - name: Apply btmp logrotate policy
   ansible.builtin.command: logrotate /etc/logrotate.d/btmp
   changed_when: false
   when:
-    - btmp_logrotate_enabled | bool
+    - log_retention_btmp_logrotate_enabled | bool
     - not ansible_check_mode

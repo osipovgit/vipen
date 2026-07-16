@@ -1,8 +1,8 @@
 # Managed by Ansible.
 /var/log/btmp {
     missingok
-    size {{ btmp_logrotate_size }}
+    size {{ log_retention_btmp_logrotate_size }}
     su root utmp
     create 0660 root utmp
-    rotate {{ btmp_logrotate_rotate }}
+    rotate {{ log_retention_btmp_logrotate_rotate }}
 }

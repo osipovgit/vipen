@@ -89,20 +89,20 @@ xui_reality_overrides:
 system_updates_enabled: true
 
 log_retention_enabled: true
-journald_system_max_use: 200M
-journald_system_keep_free: 1G
-journald_system_max_file_size: 50M
-journald_runtime_max_use: 50M
-btmp_logrotate_enabled: true
-btmp_logrotate_size: 25M
-btmp_logrotate_rotate: 1
+log_retention_journald_system_max_use: 200M
+log_retention_journald_system_keep_free: 1G
+log_retention_journald_system_max_file_size: 50M
+log_retention_journald_runtime_max_use: 50M
+log_retention_btmp_logrotate_enabled: true
+log_retention_btmp_logrotate_size: 25M
+log_retention_btmp_logrotate_rotate: 1
 
-vpn_sysctl_tuning_enabled: true
-vpn_sysctl_settings:
+network_tuning_sysctl_tuning_enabled: true
+network_tuning_sysctl_settings:
   net.core.default_qdisc: fq
   net.ipv4.tcp_congestion_control: bbr
   net.netfilter.nf_conntrack_max: "65536"
-vpn_apply_qdisc_to_default_route: true
+network_tuning_apply_qdisc_to_default_route: true
 
 vpn_monitor_enabled: true
 vpn_monitor_interval: 1min
@@ -121,9 +121,9 @@ healthcheck_docker_since: 30m
 - `ssh_admin_cidrs` - можно оставить `0.0.0.0/0` для доступа с телефона/роуминга, но безопаснее ограничить своими IP.
 - `vpn_tcp_ports` и `vpn_udp_ports` - публичные VPN-порты.
 - `xui_image` - версия 3x-ui для установки или обновления.
-- `journald_system_max_use` - максимальный размер persistent journal.
-- `btmp_logrotate_size` - размер, после которого ротируется журнал неудачных входов.
-- `vpn_sysctl_settings` - kernel TCP tuning, по умолчанию `fq` и `bbr`.
+- `log_retention_journald_system_max_use` - максимальный размер persistent journal.
+- `log_retention_btmp_logrotate_size` - размер, после которого ротируется журнал неудачных входов.
+- `network_tuning_sysctl_settings` - kernel TCP tuning, по умолчанию `fq` и `bbr`.
 - `vpn_monitor_auto_restart` - включать ли автоматический restart контейнера после нескольких failed health-check.
 
 Секреты не держите в обычном `group_vars`: `x-ui.db`, client UUID, REALITY keys, shortIds, subscription path/URI. Для полного переноса сервера используйте restore БД из backup.
