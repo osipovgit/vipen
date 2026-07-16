@@ -1,3 +1,5 @@
+[Русский](README.md) | [English](README.en_EN.md)
+
 # Vipen
 
 Ansible-пайплайн, который на Debian/Ubuntu-хосте разворачивает [3x-ui](https://github.com/MHSanaei/3x-ui) (панель управления + VPN-сервер Xray).
