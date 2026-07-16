@@ -17,4 +17,11 @@ rules:
     check-keys: false
   document-start:
     present: true
-  octal-values: disable
+  # Kept in sync with ansible-lint's expected yamllint rules (silences its
+  # "incompatible custom yamllint configuration" warning).
+  comments-indentation: false
+  braces:
+    max-spaces-inside: 1
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true

@@ -101,6 +101,7 @@
 
 - name: Apply fq qdisc to default route interface
   ansible.builtin.command: "tc qdisc replace dev {{ network_tuning_default_route_interface.stdout }} root fq"
+  changed_when: true  # only runs when current qdisc != fq (see when below)
   when:
     - network_tuning_sysctl_tuning_enabled | bool
     - network_tuning_apply_qdisc_to_default_route | bool
