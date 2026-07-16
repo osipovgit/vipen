@@ -2,6 +2,8 @@
 
 # Vipen
 
+[![Lint](https://github.com/osipovgit/vipen/actions/workflows/lint.yml/badge.svg)](https://github.com/osipovgit/vipen/actions/workflows/lint.yml)
+
 Ansible pipeline that deploys [3x-ui](https://github.com/MHSanaei/3x-ui) (management panel + Xray VPN server) on a Debian/Ubuntu host.
 
 The pipeline **does not create VPN connections or users** — you add them in the panel manually or restore them from a database backup.
