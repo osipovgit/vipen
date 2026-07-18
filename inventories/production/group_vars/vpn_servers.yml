@@ -57,9 +57,11 @@ xui_panel_listen: 127.0.0.1
 # -----------------------------------------------------------------------------
 # 3. Backups (off-host copy of x-ui.db to your local machine)
 # -----------------------------------------------------------------------------
-# x-ui.db contains client credentials. Backups are stored locally and are
-# gitignored. One timestamped copy is pulled on every full run.
-backup_local_dir: "{{ playbook_dir }}/../backups/{{ inventory_hostname }}/{{ ansible_facts['date_time']['iso8601_basic_short'] }}"
+# x-ui.db contains client credentials. Backups land in backups/ inside the repo,
+# which .gitignore covers. Keep this path INSIDE playbook_dir: one level up would
+# drop a database full of client secrets outside the gitignored tree.
+# One timestamped copy is pulled on every full run.
+backup_local_dir: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/{{ ansible_facts['date_time']['iso8601_basic_short'] }}"
 # Server-side consistent snapshot (sqlite3 online backup + integrity_check) that
 # the backup role produces before fetching off-host / keeping on-host. A live
 # file copy of an open SQLite DB can be torn (WAL/journal); the snapshot is safe.
@@ -71,7 +73,10 @@ backup_snapshot_path: "{{ xui_backup_dir }}/x-ui.db.snapshot-{{ ansible_facts['d
 #   local            -> Ansible runs ON the server itself (hosts.local.yml sets
 #                       ansible_connection: local). Off-host is impossible, so the
 #                       backup role takes an on-host snapshot into xui_backup_dir.
-run_is_local: "{{ ansible_connection | default('ssh') == 'local' }}"
+# Resolved once in site.yml (set_fact), NOT defined here: ansible_connection
+# reads as "local" inside delegate_to: localhost tasks, so a variable templated
+# here would silently flip to true for exactly the off-host tasks that need it
+# to stay false. See the "Resolve run mode" pre_task in site.yml.
 
 # -----------------------------------------------------------------------------
 # 4. System updates & log retention

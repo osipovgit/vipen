@@ -411,7 +411,7 @@ ansible-playbook site.yml --tags xui
 
 ```yaml
 xui_restore_db_enabled: true
-xui_restore_db_local_path: "../backups/vipen/YYYYMMDDTHHMMSS/x-ui.db"
+xui_restore_db_local_path: "backups/vipen/YYYYMMDDTHHMMSS/x-ui.db"
 xui_restore_db_force: false
 ```
 
