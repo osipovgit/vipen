@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -u
+
+db="{{ xui_db_dir }}/x-ui.db"
+dir="{{ xui_backup_dir }}"
+keep="{{ xui_backup_keep }}"
+prefix="x-ui.db.auto-"
+
+emit() {
+  logger -t xui-backup "$1"
+  printf '%s\n' "$1"
+}
+
+if [ ! -f "$db" ]; then
+  emit "status=FAIL reason=database_missing"
+  exit 1
+fi
+
+if ! mkdir -p "$dir" 2>/dev/null; then
+  emit "status=FAIL reason=backup_dir_unavailable"
+  exit 1
+fi
+chmod 0700 "$dir" 2>/dev/null || true
+
+ts="$(date -u +%Y%m%dT%H%M%S)"
+dst="${dir}/${prefix}${ts}"
+
+# SQLite online backup API + integrity check. A plain cp of a live WAL database
+# can be torn; this is consistent even while 3x-ui writes traffic stats.
+if ! python3 - "$db" "$dst" <<'PY'
+import sqlite3, sys
+src, dst = sys.argv[1], sys.argv[2]
+source = sqlite3.connect("file:%s?mode=ro" % src, uri=True, timeout=30)
+dest = sqlite3.connect(dst)
+try:
+    with dest:
+        source.backup(dest)
+    status = dest.execute("pragma integrity_check").fetchone()[0]
+finally:
+    source.close()
+    dest.close()
+if status != "ok":
+    sys.stderr.write("integrity_check=%s\n" % status)
+    raise SystemExit(2)
+PY
+then
+  # Never leave a half-written or corrupt snapshot behind: it would look like a
+  # valid restore point.
+  rm -f -- "$dst"
+  emit "status=FAIL reason=snapshot_failed"
+  exit 1
+fi
+
+chmod 0600 "$dst"
+size="$(stat -c %s "$dst" 2>/dev/null || echo 0)"
+
+# Rotation touches ONLY our own timestamped snapshots. Manual backups taken by
+# the xui role before risky changes (x-ui.db.bak-*) are deliberately left alone.
+#
+# Counted with find, not with a bash array: the array-length syntax starts with
+# a brace followed by a hash, which Jinja parses as the opening of a comment tag
+# and refuses to render. Do not reintroduce it here.
+removed=0
+total="$(find "$dir" -maxdepth 1 -type f -name "${prefix}*" | wc -l)"
+if [ "$total" -gt "$keep" ]; then
+  # The UTC timestamp in the name makes lexicographic order == chronological.
+  while IFS= read -r old; do
+    rm -f -- "$old" && removed=$((removed + 1))
+  done < <(find "$dir" -maxdepth 1 -type f -name "${prefix}*" | sort -r | tail -n +"$((keep + 1))")
+fi
+
+emit "status=OK file=${prefix}${ts} size=${size} integrity=ok kept=$((total - removed)) removed=${removed}"

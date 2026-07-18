@@ -1,0 +1,8 @@
+[Unit]
+Description=3x-ui database backup
+
+[Service]
+Type=oneshot
+ExecStart={{ xui_backup_script_path }}
+StandardOutput=null
+StandardError=journal

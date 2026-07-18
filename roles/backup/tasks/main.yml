@@ -136,3 +136,83 @@
   when:
     - run_is_local | bool
     - backup_xui_db.stat.exists
+
+# ---------------------------------------------------------------------------
+# Scheduled on-host backup (systemd timer).
+#
+# Everything above only runs when a human runs the playbook. Between runs the
+# database is unprotected, and clients added through the panel exist in exactly
+# one place. The timer closes that window.
+#
+# This is same-disk protection: it covers DB corruption, a bad 3x-ui migration
+# and a deleted client, NOT the loss of the VPS. Off-host copies still come from
+# running the playbook.
+# ---------------------------------------------------------------------------
+- name: Install scheduled backup script
+  ansible.builtin.template:
+    src: xui-backup.j2
+    dest: "{{ xui_backup_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: xui_backup_timer_enabled | bool
+
+- name: Install scheduled backup systemd service
+  ansible.builtin.template:
+    src: xui-backup.service.j2
+    dest: /etc/systemd/system/xui-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+  when: xui_backup_timer_enabled | bool
+
+- name: Install scheduled backup systemd timer
+  ansible.builtin.template:
+    src: xui-backup.timer.j2
+    dest: /etc/systemd/system/xui-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+  register: backup_timer_unit
+  when: xui_backup_timer_enabled | bool
+
+# daemon_reload here rather than a handler: systemd must already know the units
+# written above before this very task enables them.
+- name: Enable and start scheduled backup timer
+  ansible.builtin.systemd:
+    name: xui-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  when:
+    - xui_backup_timer_enabled | bool
+    - not ansible_check_mode
+
+# A running timer keeps its old schedule after a daemon-reload; restart it so a
+# changed xui_backup_timer_schedule takes effect now.
+- name: Restart scheduled backup timer after schedule changes
+  ansible.builtin.systemd:
+    name: xui-backup.timer
+    state: restarted
+  when:
+    - xui_backup_timer_enabled | bool
+    - backup_timer_unit.changed
+    - not ansible_check_mode
+
+- name: Check for an existing scheduled backup timer
+  ansible.builtin.stat:
+    path: /etc/systemd/system/xui-backup.timer
+  register: backup_timer_present
+  when: not (xui_backup_timer_enabled | bool)
+
+# Make the toggle actually turn the feature off instead of leaving an orphaned
+# timer running with the last-applied schedule.
+- name: Disable scheduled backup timer when turned off
+  ansible.builtin.systemd:
+    name: xui-backup.timer
+    enabled: false
+    state: stopped
+  when:
+    - not (xui_backup_timer_enabled | bool)
+    - backup_timer_present.stat.exists | default(false)
+    - not ansible_check_mode

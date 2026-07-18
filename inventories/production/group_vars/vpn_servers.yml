@@ -67,6 +67,17 @@ backup_local_dir: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/{{ ansibl
 # file copy of an open SQLite DB can be torn (WAL/journal); the snapshot is safe.
 backup_snapshot_path: "{{ xui_backup_dir }}/x-ui.db.snapshot-{{ ansible_facts['date_time']['iso8601_basic_short'] }}"
 
+# Scheduled ON-HOST backup: a systemd timer takes the same consistent snapshot
+# on the server, so the database is also protected between playbook runs (a
+# client added through the panel otherwise exists in exactly one place).
+# NOTE: same disk as the live DB. Covers corruption, a bad 3x-ui migration and
+# a deleted client; does NOT cover losing the VPS. Off-host copies still come
+# from running the playbook. Logged to journald under tag "xui-backup".
+xui_backup_timer_enabled: true
+xui_backup_script_path: /usr/local/sbin/xui-backup
+xui_backup_timer_schedule: daily         # systemd OnCalendar (daily, 04:00, Mon *-*-* 03:00 ...)
+xui_backup_keep: 7                       # kept x-ui.db.auto-* snapshots; older ones are pruned
+
 # Run mode, auto-detected from the connection plugin. Do not set by hand:
 #   remote (default) -> Ansible runs from another machine over SSH (hosts.yml).
 #                       The backup role pulls an OFF-HOST copy to the control node.

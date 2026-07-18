@@ -286,6 +286,33 @@ ansible-playbook site.yml --tags healthcheck
   - `/opt/vipen/backups/x-ui.db.bak-<timestamp>`
   - `/opt/vipen/backups/docker-compose.yml.bak-<timestamp>`
 
+#### Бэкап по расписанию
+
+Всё перечисленное выше происходит только когда вы запускаете playbook. Между запусками клиент, заведённый через панель, существует в единственном экземпляре. Поэтому на сервере работает таймер `xui-backup.timer`.
+
+- Снимает тот же консистентный snapshot (`.backup()` + `integrity_check`) в `/opt/vipen/backups/x-ui.db.auto-<timestamp>` с правами `0600`.
+- Расписание задаётся `xui_backup_timer_schedule` (формат systemd `OnCalendar`, по умолчанию `daily`), плюс случайная задержка до 15 минут и `Persistent=true` — пропущенный из-за простоя запуск догоняется после загрузки.
+- Ротация: хранится `xui_backup_keep` последних снимков (по умолчанию 7), остальные удаляются. **Ротация трогает только файлы `x-ui.db.auto-*`** — копии `x-ui.db.bak-*`, снятые ролью `xui` перед рискованными изменениями, не удаляются никогда.
+- Результат пишется в journald с тегом `xui-backup`. При ошибке unit падает и виден в `systemctl --failed`.
+
+Смотреть:
+
+```bash
+systemctl list-timers xui-backup.timer
+journalctl -t xui-backup --since '7 days ago' -o short-iso --no-pager
+ls -la /opt/vipen/backups/
+```
+
+Запустить вне расписания:
+
+```bash
+systemctl start xui-backup.service
+```
+
+Отключить: `xui_backup_timer_enabled: false` и прогон `--tags backup` — playbook остановит и выключит таймер.
+
+**Важно:** это копия на том же диске. Она защищает от повреждения БД, неудачной миграции 3x-ui и случайно удалённого клиента, но **не** от потери самого VPS. Off-host копия по-прежнему появляется только при запуске playbook.
+
 `x-ui.db` содержит клиентов, UUID, пароли и настройки панели. Его нельзя коммитить, отправлять в чат или хранить в публичных backup.
 
 ### 3x-ui
