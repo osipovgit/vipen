@@ -13,8 +13,9 @@ The pipeline **does not create VPN connections or users** — you add them in th
 - 🔒 **Server hardening** — SSH key-only access, UFW, fail2ban, panel closed to the outside (access via SSH tunnel).
 - 🐳 **Docker environment** — log rotation, `live-restore`, database snapshot before updates.
 - ⚡ **Network optimization** — `fq` + BBR, increased `nf_conntrack_max`.
-- 💾 **Backups** — copy of `x-ui.db` to your local machine, restore on a new server.
+- 💾 **Backups** — daily on-server database snapshot with rotation, off-host copy of `x-ui.db` to your local machine, restore on a new server.
 - 📊 **Monitoring** — health check every minute, signs of hypervisor overload (CPU steal, VM latency), tools for manual diagnostics.
+- 🔔 **Alerts** — Telegram push on failure and recovery, only on state changes (no spam).
 
 ## Requirements
 
@@ -64,5 +65,7 @@ See [“Running locally (on the server itself)”](docs/setup.md#локальн�
 **Full setup, roles, and scenarios guide — in [`docs/setup.md`](docs/setup.md).**
 
 It covers: pipeline parameters, panel access, updating and rolling back 3x-ui, restoring on a new server, monitoring and metrics, UFW and SSH.
+
+**Telegram alerts — in [`docs/alerting.md`](docs/alerting.md):** what counts as `FAIL` and what as `WARN`, creating the bot, storing the token in Ansible Vault.
 
 Working conventions and diagnostic scenarios — in [`AGENTS.md`](AGENTS.md).

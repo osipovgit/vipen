@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+#
+# Sends VPN health alerts to Telegram. Called by vpn-health-check; also usable
+# by hand for testing:  vpn-notify --test
+#
+# Setup, bot creation and troubleshooting: docs/alerting.md in the repository.
+#
+# Design rules:
+#   - alerting must never make the health check less reliable: every failure
+#     path exits 0 and only writes to the journal;
+#   - the decision to send is taken BEFORE the config is read, so a healthy
+#     server (the 99% case) stays completely silent even when unconfigured;
+#   - the bot token is read from a 0600 env file and handed to curl on stdin,
+#     so it never appears in the process list.
+set -u
+
+env_file="{{ vpn_monitor_alert_env_file }}"
+state_file="/run/vpn-alert.state"
+
+on_fail="{{ vpn_monitor_alert_on_fail | bool | ternary('true', 'false') }}"
+on_warn="{{ vpn_monitor_alert_on_warn | bool | ternary('true', 'false') }}"
+fail_after="{{ vpn_monitor_alert_fail_after }}"
+repeat_fail="{{ vpn_monitor_alert_repeat_fail_seconds }}"
+repeat_warn="{{ vpn_monitor_alert_repeat_warn_seconds }}"
+timeout="{{ vpn_monitor_alert_timeout_seconds }}"
+label="{{ vpn_monitor_alert_hostname }}"
+
+log() { logger -t vpn-alert "$1"; }
+
+test_mode="false"
+[ "${1:-}" = "--test" ] && test_mode="true"
+
+status="${1:-}"
+detail="${2:-}"
+failures="${3:-0}"
+now="$(date +%s)"
+
+# ---------------------------------------------------------------------------
+# 1. Decide whether an alert is due. No config is touched here on purpose.
+# ---------------------------------------------------------------------------
+last_status="OK"
+last_sent=0
+if [ -r "$state_file" ]; then
+  read -r stored_status stored_sent < "$state_file" 2>/dev/null || true
+  case "${stored_status:-}" in
+    OK | WARN | FAIL) last_status="$stored_status" ;;
+  esac
+  case "${stored_sent:-}" in
+    '' | *[!0-9]*) last_sent=0 ;;
+    *) last_sent="$stored_sent" ;;
+  esac
+fi
+
+emoji="🔧"
+subject="test alert"
+new_state=""
+
+if [ "$test_mode" = "true" ]; then
+  status="TEST"
+  detail="Test alert from ${label}. If you can read this, alerting works."
+else
+  case "$status" in
+    OK | WARN | FAIL) ;;
+    *)
+      log "status=SKIP reason=unknown_status value=${status}"
+      exit 0
+      ;;
+  esac
+
+  # Suppressed severities exit WITHOUT touching the state file, so a later
+  # change to a severity that is enabled still registers as a transition.
+  [ "$status" = "FAIL" ] && [ "$on_fail" != "true" ] && exit 0
+  [ "$status" = "WARN" ] && [ "$on_warn" != "true" ] && exit 0
+
+  if [ "$status" = "OK" ]; then
+    # Recovery is a transition, never a repeat: a healthy server stays silent.
+    [ "$last_status" = "OK" ] && exit 0
+    emoji="🟢"
+    subject="recovered"
+    detail="Previous state: ${last_status}
+${detail}"
+    new_state="OK"
+  else
+    # A single failed check is usually a blip (a slow docker exec, a container
+    # mid-restart). Require the problem to persist before waking anyone up.
+    if [ "$status" = "FAIL" ] && [ "$failures" -lt "$fail_after" ]; then
+      log "status=HELD reason=below_threshold failures=${failures} needed=${fail_after}"
+      exit 0
+    fi
+
+    repeat="$repeat_warn"
+    emoji="🟡"
+    if [ "$status" = "FAIL" ]; then
+      repeat="$repeat_fail"
+      emoji="🔴"
+    fi
+
+    if [ "$status" = "$last_status" ] && [ "$((now - last_sent))" -lt "$repeat" ]; then
+      exit 0
+    fi
+
+    subject="VPN ${status}"
+    new_state="$status"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 2. An alert IS due. From here a missing config is worth reporting.
+# ---------------------------------------------------------------------------
+give_up() {
+  log "status=SKIP reason=$1"
+  if [ "$test_mode" = "true" ]; then
+    printf 'vpn-notify: %s\n' "$2" >&2
+    exit 1
+  fi
+  exit 0
+}
+
+command -v curl >/dev/null 2>&1 || give_up "curl_missing" "curl is not installed"
+[ -r "$env_file" ] || give_up "no_config" "${env_file} is missing (see docs/alerting.md)"
+
+ALERT_TELEGRAM_TOKEN=""
+ALERT_TELEGRAM_CHAT_ID=""
+# shellcheck source=/dev/null
+. "$env_file"
+
+[ -n "$ALERT_TELEGRAM_TOKEN" ] || give_up "no_token" "ALERT_TELEGRAM_TOKEN is empty (see docs/alerting.md)"
+[ -n "$ALERT_TELEGRAM_CHAT_ID" ] || give_up "no_chat_id" "ALERT_TELEGRAM_CHAT_ID is empty (see docs/alerting.md)"
+
+text="${emoji} ${label}: ${subject}
+
+${detail}
+
+$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+rc=0
+# The token travels through curl's stdin config, not argv, so it stays out of
+# `ps`. The payload carries no credentials and goes as normal arguments.
+response="$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$ALERT_TELEGRAM_TOKEN" \
+  | curl -sS -m "$timeout" -K - \
+      --data-urlencode "chat_id=${ALERT_TELEGRAM_CHAT_ID}" \
+      --data-urlencode "text=${text}" \
+      --data-urlencode "disable_web_page_preview=true" \
+      -w '\nhttp=%{http_code}' 2>&1)" || rc=$?
+
+http="$(printf '%s' "$response" | sed -n 's/.*http=\([0-9]*\)$/\1/p')"
+
+if [ "$rc" -ne 0 ] || [ "${http:-0}" != "200" ]; then
+  # Telegram echoes the request URL in some errors: scrub the token first.
+  safe="$(printf '%s' "$response" | sed "s|${ALERT_TELEGRAM_TOKEN}|<token>|g" | tr '\n' ' ' | cut -c1-200)"
+  log "status=SEND_FAILED rc=${rc} http=${http:-none} response=${safe}"
+  if [ "$test_mode" = "true" ]; then
+    printf 'vpn-notify: send failed (rc=%s http=%s): %s\n' "$rc" "${http:-none}" "$safe" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+log "status=SENT alert_status=${status} http=${http}"
+[ -n "$new_state" ] && printf '%s %s\n' "$new_state" "$now" > "$state_file"
+[ "$test_mode" = "true" ] && printf 'vpn-notify: test message delivered\n'
+exit 0

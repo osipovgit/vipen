@@ -165,6 +165,15 @@ line="status=${status} failures=${failures} ${messages[*]}"
 logger -t vpn-health "$line"
 printf '%s\n' "$line"
 
+# Push notification. Skipped in diagnostic mode so a manual run can never spam
+# alerts. vpn-notify owns all alert policy (severity filter, threshold,
+# anti-flap repeat interval) and always exits 0, so it cannot affect the check.
+{% if vpn_monitor_alert_enabled | bool %}
+if [ "$no_restart" != "true" ] && [ -x "{{ vpn_monitor_alert_script_path }}" ]; then
+  "{{ vpn_monitor_alert_script_path }}" "$status" "${messages[*]}" "$failures" || true
+fi
+{% endif %}
+
 if [ "$status" = "FAIL" ]; then
   exit 1
 fi

@@ -12,6 +12,13 @@ inventories/production/hosts.yml
 # Local-run inventory (copy hosts.local.example.yml -> hosts.local.yml)
 inventories/production/hosts.local.yml
 
+# --- Secrets (copy secrets.example.yml -> secrets.yml, then ansible-vault encrypt) ---
+# Encrypted at rest, but still kept out of git: a vault password leak must not
+# also be a credential leak.
+inventories/production/secrets.yml
+# Vault password, if you choose a file over --ask-vault-pass.
+.vault_pass
+
 # --- Ansible runtime artifacts ---
 .ansible/
 *.retry

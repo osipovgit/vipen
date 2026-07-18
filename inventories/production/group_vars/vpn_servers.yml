@@ -47,8 +47,10 @@ firewall_reset: true
 # subscription endpoint (see section 5, xui_subscription_enabled).
 vpn_tcp_ports: [443, 8443, 2096]
 vpn_udp_ports: []
-# 3x-ui web panel port. Kept private (see xui_panel_listen / panel_public).
-panel_port: 55555
+# 3x-ui web panel port: defined in secrets.yml, NOT here. The panel is already
+# unreachable from outside (loopback bind + UFW deny), but the port and the URL
+# path together are the address of the admin UI - publishing them in a public
+# repository only helps whoever is scanning. See secrets.example.yml.
 # false -> UFW denies the panel port from the internet (reach it via SSH tunnel).
 panel_public: false
 # Address the panel binds to inside the server. 127.0.0.1 = loopback only.
@@ -186,6 +188,27 @@ vpn_monitor_conntrack_warn_percent: 75
 # Auto-restart the container after N consecutive failed checks. Off by default.
 vpn_monitor_auto_restart: false
 vpn_monitor_failure_threshold: 3
+
+# Telegram alerts on health-check state changes. Setup, bot creation and
+# troubleshooting: docs/alerting.md.
+#
+# Credentials are NOT here: vpn_monitor_alert_telegram_token / _chat_id live in
+# inventories/production/secrets.yml, which is ansible-vault encrypted and
+# gitignored. secrets.example.yml shows the structure.
+vpn_monitor_alert_enabled: true
+# FAIL = VPN is broken (container down, port dead, xray gone, disk >= 95%).
+# WARN = still working, but degrading (disk >= 85%, low memory, conntrack >=
+# 75%, hypervisor pause). See docs/alerting.md for the full list.
+vpn_monitor_alert_on_fail: true
+vpn_monitor_alert_on_warn: true
+# Consecutive failed checks before a FAIL alert fires. The check runs every
+# minute, so 2 means "still broken a minute later" and filters single blips.
+vpn_monitor_alert_fail_after: 2
+# While a problem persists, repeat at most this often. WARN is not urgent and
+# repeats far less than FAIL.
+vpn_monitor_alert_repeat_fail_seconds: 3600      # 1 hour
+vpn_monitor_alert_repeat_warn_seconds: 21600     # 6 hours
+vpn_monitor_alert_timeout_seconds: 10
 
 # Continuous hypervisor monitor: flags CPU steal and VM scheduling delay
 # (evidence for hosting-side problems). Logged under tag "vps-host-monitor".

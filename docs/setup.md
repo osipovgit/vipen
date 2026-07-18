@@ -16,7 +16,9 @@ Playbook подходит для двух сценариев:
 - `inventories/production/hosts.yml` - ваш сервер, SSH-пользователь и ключ (в `.gitignore`).
 - `inventories/production/hosts.local.example.yml` - шаблон инвентаря для запуска на самом сервере (скопируйте в `hosts.local.yml`).
 - `inventories/production/hosts.local.yml` - локальный запуск, `ansible_connection: local` (в `.gitignore`).
-- `inventories/production/group_vars/vpn_servers.yml` - центральный файл конфигурации.
+- `inventories/production/group_vars/vpn_servers.yml` - центральный файл конфигурации (без секретов).
+- `inventories/production/secrets.example.yml` - шаблон секретов с плейсхолдерами (коммитится).
+- `inventories/production/secrets.yml` - ваши секреты: порт и путь панели, токен Telegram-бота. Зашифрован `ansible-vault` и в `.gitignore`.
 - `roles/base` - базовые пакеты: `openssh-server`, `ufw`, `fail2ban`, `python3-apt`, `logrotate`.
 - `roles/log_retention` - лимиты journald, чтобы системные логи не съедали диск.
 - `roles/network_tuning` - sysctl-настройки TCP для VPN.
@@ -46,6 +48,25 @@ ansible_user: root
 ansible_ssh_private_key_file: ~/.ssh/vipen
 ```
 
+Создайте файл секретов (он в `.gitignore`, поэтому порт и путь панели, а также токен бота не попадут в репозиторий):
+
+```bash
+cp inventories/production/secrets.example.yml \
+   inventories/production/secrets.yml
+```
+
+Как минимум задайте в нём `panel_port` — порт, на котором панель слушает на loopback. В примере стоит случайное значение, замените его своим. `xui_panel_path` оставьте пустым: тогда текущий путь панели сохранится из базы и его не придётся нигде записывать.
+
+Затем зашифруйте файл:
+
+```bash
+ansible-vault encrypt inventories/production/secrets.yml
+```
+
+После шифрования playbook запускается с `--ask-vault-pass`. Подробности, включая настройку Telegram-оповещений, — в [`docs/alerting.md`](alerting.md).
+
+Если `secrets.yml` не создать, playbook возьмёт значения из `secrets.example.yml` — он останется рабочим, но со случайным портом панели и без оповещений.
+
 Проверьте `inventories/production/group_vars/vpn_servers.yml`:
 
 ```yaml
@@ -54,7 +75,7 @@ ssh_admin_cidrs:
   - 0.0.0.0/0
 
 vpn_tcp_ports: [443, 8443, 2096]
-panel_port: 55555
+panel_port: <ваш-порт>          # задаётся в secrets.yml, не здесь
 panel_public: false
 xui_panel_listen: 127.0.0.1
 
@@ -215,7 +236,7 @@ ansible-playbook site.yml --tags healthcheck
   - `443/tcp` - основной VLESS/REALITY.
   - `8443/tcp` - второй VLESS/REALITY inbound.
   - `2096/tcp` - subscription endpoint 3x-ui.
-- Закрывает порт панели `55555/tcp`, если `panel_public: false`.
+- Закрывает порт панели `panel_port/tcp`, если `panel_public: false`.
 
 По умолчанию `firewall_reset: true`, поэтому playbook считает firewall своей зоной ответственности и пересобирает UFW-правила из переменных. Для сервера с другими сервисами это нужно менять осознанно.
 
@@ -339,13 +360,13 @@ systemctl start xui-backup.service
 Панель доступна через SSH tunnel:
 
 ```bash
-ssh -i ~/.ssh/vipen -L 55555:127.0.0.1:55555 root@<your-server-ip>
+ssh -i ~/.ssh/vipen -L <panel-port>:127.0.0.1:<panel-port> root@<your-server-ip>
 ```
 
 Потом открывайте локально:
 
 ```text
-http://127.0.0.1:55555/<panel-path>/
+http://127.0.0.1:<panel-port>/<panel-path>/
 ```
 
 ### Monitoring
@@ -363,6 +384,7 @@ http://127.0.0.1:55555/<panel-path>/
   - ядро не фиксировало паузу виртуальной машины за последние две минуты.
 - Дополнительно логирует информационные метрики (не влияют на статус): `load1` и число `established`-соединений на VPN-портах.
 - Пишет результат в journald с tag `vpn-health`.
+- При смене состояния отправляет уведомление в Telegram. Разбор `FAIL` и `WARN`, создание бота, настройка Ansible Vault и диагностика — в **[`docs/alerting.md`](alerting.md)**.
 - Запускает отдельный `vps-host-monitor.service` с интервалом `5` секунд.
 - Он фиксирует только аномалии:
   - CPU steal не ниже `5%` за интервал;

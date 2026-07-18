@@ -55,6 +55,56 @@
   notify: Reload systemd daemon
   when: vpn_monitor_host_enabled | bool
 
+# Alerting. The credentials file is written before the script that reads it, and
+# is the only 0600 artefact in this role. Setup guide: docs/alerting.md.
+- name: Ensure alert configuration directory exists
+  ansible.builtin.file:
+    path: "{{ vpn_monitor_alert_env_file | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: vpn_monitor_alert_enabled | bool
+
+# no_log: the rendered file is a bot token. Ansible would otherwise print it in
+# the diff on --diff runs.
+- name: Install alert credentials
+  ansible.builtin.template:
+    src: alert.env.j2
+    dest: "{{ vpn_monitor_alert_env_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when:
+    - vpn_monitor_alert_enabled | bool
+    - vpn_monitor_alert_telegram_token | length > 0
+
+# Without credentials the file would only mislead: remove it so vpn-notify
+# reports "no_config" instead of silently doing nothing with empty values.
+- name: Remove alert credentials when alerting is off or unconfigured
+  ansible.builtin.file:
+    path: "{{ vpn_monitor_alert_env_file }}"
+    state: absent
+  when: >-
+    not (vpn_monitor_alert_enabled | bool)
+    or vpn_monitor_alert_telegram_token | length == 0
+
+- name: Install alert notifier script
+  ansible.builtin.template:
+    src: vpn-notify.j2
+    dest: "{{ vpn_monitor_alert_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: vpn_monitor_alert_enabled | bool
+
+- name: Remove alert notifier script when alerting is off
+  ansible.builtin.file:
+    path: "{{ vpn_monitor_alert_script_path }}"
+    state: absent
+  when: not (vpn_monitor_alert_enabled | bool)
+
 # 2. Apply all unit-file changes with a single daemon-reload before any unit is
 #    enabled or started, so systemd already knows the freshly written units.
 - name: Reload systemd once for all monitor units

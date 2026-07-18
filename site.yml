@@ -4,6 +4,14 @@
   become: true
   gather_facts: true
 
+  # Secrets (alert credentials) come from an ansible-vault encrypted, gitignored
+  # secrets.yml. The committed example is the fallback so a fresh clone runs as
+  # before, with alerting simply inert. See docs/alerting.md.
+  vars_files:
+    - "{{ lookup('ansible.builtin.first_found', [
+           playbook_dir ~ '/inventories/production/secrets.yml',
+           playbook_dir ~ '/inventories/production/secrets.example.yml']) }}"
+
   pre_tasks:
     # Freeze the run mode against the TARGET connection, once per play.
     # Templating this in group_vars instead would re-evaluate it per task, and

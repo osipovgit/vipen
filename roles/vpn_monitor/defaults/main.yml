@@ -4,7 +4,8 @@ vpn_monitor_interval: 1min
 vpn_monitor_script_path: /usr/local/sbin/vpn-health-check
 vpn_monitor_container_name: 3xui_app
 vpn_monitor_panel_host: 127.0.0.1
-vpn_monitor_panel_port: 55555
+# Placeholder only: the real port comes from panel_port in secrets.yml.
+vpn_monitor_panel_port: 54836
 vpn_monitor_tcp_ports:
   - 443
 vpn_monitor_disk_warn_percent: 85
@@ -19,3 +20,17 @@ vpn_monitor_host_interval_seconds: 5
 vpn_monitor_host_steal_warn_percent: 5
 vpn_monitor_host_delay_warn_ms: 1000
 vpn_monitor_host_summary_seconds: 3600
+
+# Telegram alerts. Credentials come from ansible-vault, never from here.
+vpn_monitor_alert_enabled: false
+vpn_monitor_alert_script_path: /usr/local/sbin/vpn-notify
+vpn_monitor_alert_env_file: /etc/vipen/alert.env
+vpn_monitor_alert_hostname: "{{ inventory_hostname }}"
+vpn_monitor_alert_on_fail: true
+vpn_monitor_alert_on_warn: true
+vpn_monitor_alert_fail_after: 2
+vpn_monitor_alert_repeat_fail_seconds: 3600
+vpn_monitor_alert_repeat_warn_seconds: 21600
+vpn_monitor_alert_timeout_seconds: 10
+vpn_monitor_alert_telegram_token: ""
+vpn_monitor_alert_telegram_chat_id: ""

@@ -198,13 +198,11 @@
   when:
     - not ansible_check_mode
 
-- name: Wait for 3x-ui panel port locally
-  ansible.builtin.wait_for:
-    host: 127.0.0.1
-    port: "{{ panel_port }}"
-    timeout: 30
-  when: not ansible_check_mode
-
+# The panel port is NOT waited on here on purpose. When panel_port changes, the
+# container is still serving the OLD port at this point, so waiting for the new
+# one would time out. The database file and schema checks below prove the
+# container came up; the port is verified at the very end, after the settings
+# are written and the container is restarted.
 - name: Wait for 3x-ui database file
   ansible.builtin.wait_for:
     path: "{{ xui_db_dir }}/x-ui.db"
@@ -277,6 +275,77 @@
   when:
     - xui_db.stat.exists
     - xui_panel_listen | length > 0
+    - not ansible_check_mode
+  tags: [panel]
+
+# Keeps the declared panel_port and the running panel in agreement: the same
+# value drives the UFW deny rule and the health check, so it must not be a
+# guess. Defined in secrets.yml, see secrets.example.yml.
+- name: Set 3x-ui panel port
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import sqlite3, sys
+        db_path, port = sys.argv[1], sys.argv[2]
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        row = cur.execute("select value from settings where key = 'webPort'").fetchone()
+        current = row[0] if row else None
+        if current != port:
+            if row:
+                cur.execute("update settings set value = ? where key = 'webPort'", (port,))
+            else:
+                cur.execute("insert into settings(key, value) values('webPort', ?)", (port,))
+            conn.commit()
+            print("changed")
+        else:
+            print("ok")
+        conn.close()
+      - "{{ xui_db_dir }}/x-ui.db"
+      - "{{ panel_port | string }}"
+  register: xui_panel_port_update
+  changed_when: "'changed' in xui_panel_port_update.stdout"
+  when:
+    - xui_db.stat.exists
+    - not ansible_check_mode
+  tags: [panel]
+
+# The panel URL path is a secret: it is the second half of the admin UI address.
+# Empty means "keep whatever the database already has", so an existing server is
+# never touched and the real value never has to be written down anywhere.
+# no_log: the path would otherwise show up in verbose output and failure dumps.
+- name: Set 3x-ui panel path
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import sqlite3, sys
+        db_path, base_path = sys.argv[1], sys.argv[2]
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        row = cur.execute("select value from settings where key = 'webBasePath'").fetchone()
+        current = row[0] if row else None
+        if current != base_path:
+            if row:
+                cur.execute("update settings set value = ? where key = 'webBasePath'", (base_path,))
+            else:
+                cur.execute("insert into settings(key, value) values('webBasePath', ?)", (base_path,))
+            conn.commit()
+            print("changed")
+        else:
+            print("ok")
+        conn.close()
+      - "{{ xui_db_dir }}/x-ui.db"
+      - "{{ xui_panel_path | default('') }}"
+  register: xui_panel_path_update
+  changed_when: "'changed' in xui_panel_path_update.stdout"
+  no_log: true
+  when:
+    - xui_db.stat.exists
+    - xui_panel_path | default('') | length > 0
     - not ansible_check_mode
   tags: [panel]
 
@@ -409,18 +478,20 @@
   when:
     - >
       (xui_panel_listen_update is defined and xui_panel_listen_update.changed)
+      or (xui_panel_port_update is defined and xui_panel_port_update.changed)
+      or (xui_panel_path_update is defined and xui_panel_path_update.changed)
       or (xui_subscription_update is defined and xui_subscription_update.changed)
       or (xui_reality_update is defined and xui_reality_update.changed)
     - not ansible_check_mode
   register: xui_database_restart
   tags: [panel]
 
-- name: Wait for 3x-ui panel port after database setting changes
+# Unconditional: this is the single proof that the panel really serves on the
+# port the rest of the playbook assumes (UFW deny rule, health check probe).
+# A restart above only changes how long it takes to come back.
+- name: Wait for 3x-ui panel port
   ansible.builtin.wait_for:
     host: 127.0.0.1
     port: "{{ panel_port }}"
-    timeout: 30
-  when:
-    - xui_database_restart is defined
-    - xui_database_restart.changed
-    - not ansible_check_mode
+    timeout: 60
+  when: not ansible_check_mode
