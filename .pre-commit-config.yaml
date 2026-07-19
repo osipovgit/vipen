@@ -11,7 +11,7 @@ repos:
     rev: v26.6.0
     hooks:
       - id: ansible-lint
-        files: ^(site\.yml|roles/|inventories/)
+        files: ^(site\.yml|roles/|inventories/|tests/)
 
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12
@@ -28,3 +28,15 @@ repos:
     rev: v8.21.2
     hooks:
       - id: gitleaks
+
+  # The hook above only sees plain .sh files. Roughly 600 lines of bash ship as
+  # Jinja templates instead - including the health check that decides whether
+  # the VPN is up - so those are rendered first and checked on the result.
+  - repo: local
+    hooks:
+      - id: shellcheck-templates
+        name: shellcheck (rendered shell templates)
+        entry: tests/shellcheck-templates.sh
+        language: system
+        pass_filenames: false
+        files: ^(roles/.+\.j2|inventories/production/(group_vars/.+|secrets\.example\.yml)|tests/.+)$

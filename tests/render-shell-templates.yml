@@ -1,0 +1,68 @@
+---
+# Renders every shell template in roles/*/templates through the real Jinja
+# engine, so that shellcheck can analyse what actually lands on the server.
+# Driven by tests/shellcheck-templates.sh - not meant to be run by hand.
+#
+# Runs against localhost with no inventory: nothing here touches a server, and
+# a fresh clone without hosts.yml can still lint.
+- name: Render shell templates for static analysis
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    repo_root: "{{ playbook_dir | dirname }}"
+    # Set by the driver script.
+    render_dir: "{{ undef('render_dir is required, run tests/shellcheck-templates.sh') }}"
+
+  tasks:
+    # Same layering as a real run - role defaults first, central configuration
+    # on top - so the rendered script matches production, including which
+    # conditional blocks are taken.
+    - name: Find role defaults
+      ansible.builtin.find:
+        paths: "{{ repo_root }}/roles"
+        patterns: "main.yml"
+        recurse: true
+      register: role_main_files
+
+    - name: Load role defaults
+      ansible.builtin.include_vars: "{{ item }}"
+      loop: "{{ role_main_files.files | map(attribute='path') | select('search', '/defaults/main\\.yml$') | sort }}"
+
+    - name: Load central configuration
+      ansible.builtin.include_vars: "{{ repo_root }}/inventories/production/group_vars/vpn_servers.yml"
+
+    # Deliberately the example, never the real secrets.yml: linting must not
+    # ask for a vault password, and real credentials have no business being
+    # written to a temporary directory. Placeholders render identically.
+    - name: Load secret placeholders
+      ansible.builtin.include_vars: "{{ repo_root }}/inventories/production/secrets.example.yml"
+
+    # A shebang is what makes a template a script - cheaper to detect than to
+    # maintain a list that a future role would forget to update.
+    - name: Find shell templates
+      ansible.builtin.find:
+        paths: "{{ repo_root }}/roles"
+        patterns: "*.j2"
+        contains: '^#!.*sh$'
+        recurse: true
+      register: shell_templates
+
+    - name: Fail if no shell template was found
+      ansible.builtin.assert:
+        that: shell_templates.files | length > 0
+        fail_msg: >-
+          No shell templates found under roles/ - the detection above is broken,
+          and reporting success would mean linting nothing.
+
+    # Named <role>-<script>: two roles may ship a template with the same
+    # basename, and a silent overwrite would drop one from the check.
+    - name: Render shell templates
+      ansible.builtin.template:
+        src: "{{ item.path }}"
+        dest: "{{ render_dir }}/{{ item.path | dirname | dirname | basename }}-{{ item.path | basename | regex_replace('\\.j2$', '') }}"
+        mode: "0755"
+      loop: "{{ shell_templates.files }}"
+      loop_control:
+        label: "{{ item.path | relpath(repo_root) }}"
