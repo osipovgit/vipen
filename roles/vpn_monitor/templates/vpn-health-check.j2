@@ -8,6 +8,8 @@ disk_warn="{{ vpn_monitor_disk_warn_percent }}"
 disk_fail="{{ vpn_monitor_disk_fail_percent }}"
 mem_warn="{{ vpn_monitor_mem_warn_mb }}"
 conntrack_warn="{{ vpn_monitor_conntrack_warn_percent }}"
+backup_dir="{{ vpn_monitor_backup_dir }}"
+backup_max_age_hours="{{ vpn_monitor_backup_max_age_hours }}"
 auto_restart="{{ vpn_monitor_auto_restart | bool | ternary('true', 'false') }}"
 failure_threshold="{{ vpn_monitor_failure_threshold }}"
 state_file="/run/vpn-health.failures"
@@ -111,6 +113,45 @@ if [ -r /proc/sys/net/netfilter/nf_conntrack_count ] && [ -r /proc/sys/net/netfi
   else
     messages+=("conntrack=${conntrack_count}/${conntrack_max}")
   fi
+fi
+
+# Backup freshness. A backup that quietly stopped running looks exactly like a
+# working one until the day it is needed, which is the worst possible day to
+# find out. WARN, not FAIL: the VPN itself is still serving traffic.
+if [ -n "$backup_dir" ] && [ "$backup_max_age_hours" -gt 0 ]; then
+  backup_state="$(systemctl is-active xui-backup.service 2>/dev/null || true)"
+  case "$backup_state" in
+    activating | active | reloading)
+      # A snapshot is being written right now, so the newest finished one is by
+      # definition the previous run. Judging age here would raise an alarm
+      # precisely while the backup is doing its job - and after downtime, when
+      # the catch-up run starts against a days-old snapshot, it would fire every
+      # single time. The snapshot itself is published atomically, so the only
+      # thing left to avoid is this timing window.
+      messages+=("backup=in_progress")
+      ;;
+    *)
+      newest_backup="$(find "$backup_dir" -maxdepth 1 -type f -name 'x-ui.db.auto-*' -printf '%T@\n' 2>/dev/null | sort -n | tail -n 1)"
+      if [ -z "$newest_backup" ]; then
+        mark_warn "backup_missing dir=${backup_dir}"
+      else
+        backup_age_hours=$(( ( $(date +%s) - ${newest_backup%.*} ) / 3600 ))
+        if [ "$backup_age_hours" -ge "$backup_max_age_hours" ]; then
+          mark_warn "backup_stale=${backup_age_hours}h"
+        else
+          messages+=("backup_age=${backup_age_hours}h")
+        fi
+      fi
+      ;;
+  esac
+fi
+
+# systemd's own failure list. This is the one check that also covers the
+# monitoring itself: a broken xui-backup.timer or vps-host-daily.service would
+# otherwise fail silently, and nothing else here would ever notice.
+failed_units="$(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}' | paste -sd, - | cut -c1-200)"
+if [ -n "$failed_units" ]; then
+  mark_warn "failed_units=${failed_units}"
 fi
 
 # Informational metrics. These never change status; they add visibility for

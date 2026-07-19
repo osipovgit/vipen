@@ -12,6 +12,10 @@ vpn_monitor_disk_warn_percent: 85
 vpn_monitor_disk_fail_percent: 95
 vpn_monitor_mem_warn_mb: 128
 vpn_monitor_conntrack_warn_percent: 75
+# Backup freshness. 0 disables the check - use it if the scheduled backup is
+# turned off, otherwise the check warns about a snapshot nobody schedules.
+vpn_monitor_backup_dir: /opt/vipen/backups
+vpn_monitor_backup_max_age_hours: 26
 vpn_monitor_auto_restart: false
 vpn_monitor_failure_threshold: 3
 vpn_monitor_host_enabled: true

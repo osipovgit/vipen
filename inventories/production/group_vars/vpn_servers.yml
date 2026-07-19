@@ -185,6 +185,13 @@ vpn_monitor_disk_warn_percent: 85
 vpn_monitor_disk_fail_percent: 95
 vpn_monitor_mem_warn_mb: 128
 vpn_monitor_conntrack_warn_percent: 75
+# Свежесть автобэкапа: молча переставший работать бэкап обнаруживается только
+# тогда, когда он понадобился. Порог держится с запасом к расписанию
+# xui_backup_timer_schedule: ежедневный запуск плюс разброс до 15 минут дают
+# худший нормальный разрыв ~24ч15м, так что 26 часов не сработают на исправном
+# сервере. 0 = не проверять (поставьте, если xui_backup_timer_enabled: false).
+vpn_monitor_backup_dir: "{{ xui_backup_dir }}"
+vpn_monitor_backup_max_age_hours: 26
 # Auto-restart the container after N consecutive failed checks. Off by default.
 vpn_monitor_auto_restart: false
 vpn_monitor_failure_threshold: 3
