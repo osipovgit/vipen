@@ -29,3 +29,6 @@ inventories/production/secrets.yml
 *.swp
 .idea/
 .vscode/
+
+# Local virtualenvs, e.g. for the Molecule stack in molecule/requirements.txt.
+.venv*/

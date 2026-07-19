@@ -1,0 +1,23 @@
+---
+- name: Converge
+  hosts: all
+  become: true
+
+  # Deliberately explicit rather than loading group_vars/vpn_servers.yml: the
+  # scenario tests role behaviour, not production configuration, and pulling in
+  # the real inventory would drag secrets.yml along with it.
+  vars:
+    ssh_port: 22
+    # A throwaway public key. The ssh role refuses to disable password auth
+    # while root has no authorized key - that guard is the reason this is here,
+    # and supplying a key is what lets the role reach the hardening tasks.
+    # Public keys are not secrets, and nothing holds the matching private half.
+    ssh_authorized_keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJQZ9Zx1kFqYyO6ZK0kL7vE3rN8mT2wXhP4dJ1sB6cRa molecule-idempotence-test"
+    system_updates_enabled: true
+
+  roles:
+    - base
+    - log_retention
+    - system_updates
+    - ssh

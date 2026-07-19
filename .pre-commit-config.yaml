@@ -11,15 +11,20 @@ repos:
     rev: v26.6.0
     hooks:
       - id: ansible-lint
-        files: ^(site\.yml|roles/|inventories/|tests/)
+        files: ^(site\.yml|roles/|inventories/|tests/|molecule/)
 
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12
     hooks:
       - id: actionlint
 
-  - repo: https://github.com/koalaman/shellcheck-precommit
-    rev: v0.10.0
+  # shellcheck-py, not koalaman/shellcheck-precommit: the upstream hook runs the
+  # linter in a container, which makes a Docker daemon a hard requirement for
+  # `pre-commit run` on a laptop. This one is the same shellcheck 0.10.0 shipped
+  # as a Python wheel, so the whole hook set now runs without a container - and
+  # it is the exact binary the template hook below already used.
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
     hooks:
       - id: shellcheck
         args: ["--severity=error"]

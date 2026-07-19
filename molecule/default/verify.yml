@@ -1,0 +1,91 @@
+---
+# Verifier: ansible, not testinfra. Molecule 6 made this the default, and the
+# whole check fits in a handful of asserts - a separate Python test stack would
+# be more machinery than the thing it tests.
+#
+# Idempotence is checked by Molecule itself (the second converge must report
+# changed=0), so nothing here re-tests it. These asserts answer the other
+# question: did the roles produce the state they claim to.
+- name: Verify
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Collect installed packages
+      ansible.builtin.package_facts:
+        manager: apt
+
+    - name: Base packages are installed
+      ansible.builtin.assert:
+        that: item in ansible_facts.packages
+        fail_msg: "base did not install {{ item }}"
+      loop:
+        - ca-certificates
+        - fail2ban
+        - logrotate
+        - openssh-server
+        - ufw
+
+    - name: Read journald drop-in
+      ansible.builtin.slurp:
+        src: /etc/systemd/journald.conf.d/99-vpn-limits.conf
+      register: verify_journald_dropin
+
+    - name: Journald retention limits are applied
+      ansible.builtin.assert:
+        that:
+          - "'SystemMaxUse=200M' in verify_journald_conf"
+          - "'SystemKeepFree=1G' in verify_journald_conf"
+          - "'RuntimeMaxUse=50M' in verify_journald_conf"
+        fail_msg: "journald drop-in does not carry the configured limits"
+      vars:
+        verify_journald_conf: "{{ verify_journald_dropin.content | b64decode }}"
+
+    - name: Read btmp logrotate policy
+      ansible.builtin.slurp:
+        src: /etc/logrotate.d/btmp
+      register: verify_btmp_policy
+
+    - name: Btmp rotation policy is applied
+      ansible.builtin.assert:
+        that:
+          - "'size 25M' in verify_btmp_conf"
+          - "'rotate 1' in verify_btmp_conf"
+        fail_msg: "btmp logrotate policy does not carry the configured limits"
+      vars:
+        verify_btmp_conf: "{{ verify_btmp_policy.content | b64decode }}"
+
+    - name: Stat root authorized_keys
+      ansible.builtin.stat:
+        path: /root/.ssh/authorized_keys
+      register: verify_root_keys
+
+    - name: Root authorized_keys exists and is not world-readable
+      ansible.builtin.assert:
+        that:
+          - verify_root_keys.stat.exists
+          - verify_root_keys.stat.mode == "0600"
+        fail_msg: "root authorized_keys missing or has wrong mode"
+
+    # Deliberately asks sshd for its *effective* configuration rather than
+    # reading the drop-in back. Reading the file we just wrote would prove
+    # almost nothing; this proves the drop-in is actually included, which is the
+    # part that can silently fail.
+    - name: Ask sshd for its effective configuration
+      ansible.builtin.command: sshd -T
+      changed_when: false
+      register: verify_sshd_effective
+
+    # Note the value on permitrootlogin: the role writes `prohibit-password`,
+    # but `sshd -T` reports the exact synonym `without-password`, which is the
+    # token OpenSSH canonicalises to. Asserting the written spelling here fails
+    # against a correctly configured server.
+    - name: SSH hardening is in effect, not merely on disk
+      ansible.builtin.assert:
+        that:
+          - "'passwordauthentication no' in verify_sshd_effective.stdout_lines"
+          - "'kbdinteractiveauthentication no' in verify_sshd_effective.stdout_lines"
+          - "'permitrootlogin without-password' in verify_sshd_effective.stdout_lines"
+          - "'maxauthtries 3' in verify_sshd_effective.stdout_lines"
+        fail_msg: "sshd drop-in is on disk but not in effect - check the Include line"

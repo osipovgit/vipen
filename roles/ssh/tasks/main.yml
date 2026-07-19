@@ -58,6 +58,7 @@
     regexp: '^#?Include\s+/etc/ssh/sshd_config\.d/\*\.conf'
     line: 'Include /etc/ssh/sshd_config.d/*.conf'
     insertbefore: BOF
+  register: ssh_include_line
 
 - name: Configure SSH hardening
   ansible.builtin.copy:
@@ -73,17 +74,24 @@
       PermitRootLogin prohibit-password
       MaxAuthTries 3
       LoginGraceTime 30
+  register: ssh_hardening_config
 
 - name: Validate sshd config
   ansible.builtin.command: sshd -t
   changed_when: false
   when: not ansible_check_mode
 
+# Conditional on the config actually changing. `state: reloaded` is documented
+# as "will always reload" and the module hardcodes changed=true for it, so an
+# unconditional reload makes every run report changed - which is both noise and
+# a needless daemon reload on a box whose only remote access is this daemon.
 - name: Reload sshd
   ansible.builtin.service:
     name: ssh
     state: reloaded
-  when: not ansible_check_mode
+  when:
+    - not ansible_check_mode
+    - ssh_include_line.changed or ssh_hardening_config.changed
 
 - name: Reset Ansible SSH connection after sshd reload
   ansible.builtin.meta: reset_connection

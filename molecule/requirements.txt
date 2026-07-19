@@ -1,0 +1,7 @@
+# Pinned for the same reason every linter in .pre-commit-config.yaml is pinned:
+# an idempotence test that silently changes behaviour between runs is worse than
+# no test at all. Bump deliberately, not by drift.
+ansible-core==2.21.2
+molecule==26.6.0
+molecule-plugins[docker]==26.7.15
+docker==7.2.0

@@ -158,6 +158,33 @@ ansible-playbook site.yml --check --diff
 
 Важно про `--check`: это не полное доказательство безопасности. Многие действия в ролях `firewall`, `docker`, `xui` — это `command`-задачи (ufw reset/enable, установка Docker, `docker compose pull/up`, записи в БД), которые в check-режиме пропускаются и в diff не видны. Diff показывают только шаблоны/файлы конфигов; кандидат `docker-compose.yml` валидируется отдельно через временный render. Для рискованных изменений проверяйте на staging-хосте или применяйте по `--tags`.
 
+### Тест идемпотентности (Molecule)
+
+Линтеры проверяют текст плейбуков. Molecule — единственное место, где роли действительно выполняются: он поднимает чистый контейнер Debian 12, применяет роли, а затем **прогоняет их второй раз** и требует, чтобы во втором прогоне не изменилось ничего. Это ловит задачи, которые рапортуют «изменено» на неизменившемся сервере.
+
+Покрываются четыре роли — `base`, `log_retention`, `system_updates`, `ssh`. Остальные вне зоны сознательно: `network_tuning` требует sysctl хоста, `firewall` — реального nftables, `docker` и `xui` потянули бы docker-in-docker.
+
+```bash
+python -m venv .venv-molecule
+.venv-molecule/bin/pip install -r molecule/requirements.txt
+.venv-molecule/bin/ansible-galaxy collection install -r molecule/default/collections.yml
+
+.venv-molecule/bin/molecule test        # полный цикл, контейнер удаляется в конце
+.venv-molecule/bin/molecule converge    # применить роли и оставить контейнер
+.venv-molecule/bin/molecule login       # зайти внутрь и посмотреть
+.venv-molecule/bin/molecule destroy     # прибрать
+```
+
+Это единственная проверка в проекте, которой нужен работающий Docker, и запускать её локально необязательно: в CI она выполняется на каждом pull request. Локальный прогон полезен, когда вы правите сами роли и хотите увидеть результат до пуша.
+
+На macOS Docker всегда работает внутри Linux-виртуалки — либо Docker Desktop, либо более лёгкая Colima (`brew install colima && colima start`). С Colima дополнительно задайте переменную: библиотека, через которую Molecule управляет контейнером, не читает docker-контексты и иначе стучится не в тот сокет.
+
+```bash
+export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
+```
+
+В CI ничего этого не нужно: раннер — это Linux, Docker там работает нативно.
+
 ## Применение
 
 ```bash

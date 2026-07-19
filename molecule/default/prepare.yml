@@ -1,0 +1,26 @@
+---
+# Brings the container to the state a real VPS is already in before the
+# playbook ever runs. Molecule connects through `docker exec`, so nothing here
+# starts sshd on its own - but on the real server Ansible arrives *over* SSH,
+# which means sshd is running by definition.
+#
+# Without this, `sshd -t` in the ssh role fails on "Missing privilege separation
+# directory: /run/sshd" - a property of the empty container, not of the role.
+# Papering over it by creating /run/sshd by hand would hide the difference;
+# starting the service reproduces the real precondition instead.
+- name: Prepare
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Install openssh-server
+      ansible.builtin.apt:
+        name: openssh-server
+        update_cache: true
+        cache_valid_time: 3600
+        state: present
+
+    - name: Start sshd
+      ansible.builtin.service:
+        name: ssh
+        state: started

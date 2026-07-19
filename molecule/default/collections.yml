@@ -1,0 +1,9 @@
+---
+# The docker driver drives the container through these collections, so Molecule
+# refuses to start without them - they are a hard prerequisite, not a
+# convenience. Pinned for the same reason as molecule/requirements.txt.
+collections:
+  - name: community.docker
+    version: "5.2.1"
+  - name: ansible.posix
+    version: "2.2.2"

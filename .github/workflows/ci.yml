@@ -38,6 +38,35 @@ jobs:
           -i inventories/production/hosts.example.yml
           site.yml --syntax-check
 
+  # The only job that runs the roles instead of reading them. Everything above
+  # checks text; this checks behaviour - most importantly that a second converge
+  # reports changed=0. Runners ship Docker, so no service container is needed.
+  molecule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/pip
+          key: molecule-${{ env.pythonLocation }}-${{ hashFiles('molecule/requirements.txt') }}
+
+      - run: python -m pip install --upgrade -r molecule/requirements.txt
+
+      # Molecule verifies the driver's collections are present before it starts,
+      # so this cannot be left to the scenario's own dependency step.
+      - run: ansible-galaxy collection install -r molecule/default/collections.yml
+
+      - name: Molecule (create, converge, idempotence, verify, destroy)
+        run: molecule test
+
   secret-scan:
     runs-on: ubuntu-latest
     permissions:

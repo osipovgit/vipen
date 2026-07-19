@@ -21,9 +21,15 @@
     - system_updates_enabled | bool
     - not ansible_check_mode
 
+# The apt module hardcodes changed=true for `clean`, with no detection of
+# whether anything was actually evicted. Reported honestly it would mean "the
+# downloaded .deb archives are gone" - and those are a cache, not part of the
+# server's configured state, so the flag carries no information about the host
+# either way. Left as-is it just makes every run report a change.
 - name: Clean apt package cache
   ansible.builtin.apt:
     clean: true
+  changed_when: false
   when:
     - system_updates_enabled | bool
     - not ansible_check_mode
