@@ -218,6 +218,14 @@ vpn_monitor_host_steal_warn_percent: 5
 vpn_monitor_host_delay_warn_ms: 1000
 vpn_monitor_host_summary_seconds: 3600
 
+# The monitor above samples every 5 seconds, so it can never alert directly:
+# a bad night would be hundreds of messages. Instead the previous day is
+# aggregated into ONE Telegram message. A day without anomalies sends nothing,
+# so the ceiling is one message per day. Delivered through vpn-notify, so it
+# needs vpn_monitor_alert_enabled above.
+vpn_monitor_host_daily_enabled: true
+vpn_monitor_host_daily_schedule: "*-*-* 00:00:00"   # systemd OnCalendar, +5min jitter
+
 # -----------------------------------------------------------------------------
 # 8. Manual healthcheck (tag: healthcheck, not run by the default playbook)
 # -----------------------------------------------------------------------------

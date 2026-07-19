@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Sends VPN health alerts to Telegram. Called by vpn-health-check; also usable
-# by hand for testing:  vpn-notify --test
+# Sends VPN health alerts to Telegram. Called by vpn-health-check and by
+# vps-host-daily; also usable by hand for testing:  vpn-notify --test
 #
 # Setup, bot creation and troubleshooting: docs/alerting.md in the repository.
 #
@@ -29,6 +29,13 @@ log() { logger -t vpn-alert "$1"; }
 
 test_mode="false"
 [ "${1:-}" = "--test" ] && test_mode="true"
+
+# Digest mode: vps-host-daily hands over a ready-made message. It skips the
+# state machine below - a daily summary is not a state transition - but reuses
+# everything after it: config, token handling, scrubbing, exit-0 discipline.
+#   vpn-notify --report "<subject>" "<body>"
+report_mode="false"
+[ "${1:-}" = "--report" ] && report_mode="true"
 
 status="${1:-}"
 detail="${2:-}"
@@ -58,6 +65,13 @@ new_state=""
 if [ "$test_mode" = "true" ]; then
   status="TEST"
   detail="Test alert from ${label}. If you can read this, alerting works."
+elif [ "$report_mode" = "true" ]; then
+  status="REPORT"
+  emoji="📊"
+  subject="${2:-daily report}"
+  detail="${3:-}"
+  # new_state stays empty on purpose: the digest must never overwrite the
+  # health state, or it would swallow the next real FAIL transition.
 else
   case "$status" in
     OK | WARN | FAIL) ;;

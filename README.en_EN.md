@@ -15,7 +15,7 @@ The pipeline **does not create VPN connections or users** — you add them in th
 - ⚡ **Network optimization** — `fq` + BBR, increased `nf_conntrack_max`.
 - 💾 **Backups** — daily on-server database snapshot with rotation, off-host copy of `x-ui.db` to your local machine, restore on a new server.
 - 📊 **Monitoring** — health check every minute, signs of hypervisor overload (CPU steal, VM latency), tools for manual diagnostics.
-- 🔔 **Alerts** — Telegram push on failure and recovery, only on state changes (no spam).
+- 🔔 **Alerts** — Telegram push on VPN failure and recovery (only on state changes), daily report on hypervisor problems (one summary per day).
 
 ## Requirements
 

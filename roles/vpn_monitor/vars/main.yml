@@ -1,0 +1,12 @@
+---
+# Derived, deliberately not in defaults/: the digest is only meaningful when
+# both the monitor that produces the data and the notifier that delivers it are
+# on. Keeping it here means a user cannot switch it into an inconsistent state
+# from group_vars.
+#
+# Always test it with `| bool`: this renders to the string "False", which is
+# truthy on its own in a `when:`.
+vpn_monitor_daily_enabled: >-
+  {{ (vpn_monitor_host_daily_enabled | bool)
+     and (vpn_monitor_host_enabled | bool)
+     and (vpn_monitor_alert_enabled | bool) }}

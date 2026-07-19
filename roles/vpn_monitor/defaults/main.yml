@@ -21,6 +21,12 @@ vpn_monitor_host_steal_warn_percent: 5
 vpn_monitor_host_delay_warn_ms: 1000
 vpn_monitor_host_summary_seconds: 3600
 
+# Daily digest of the host monitor's anomalies. Needs alerting to be enabled:
+# it delivers through vpn-notify.
+vpn_monitor_host_daily_enabled: false
+vpn_monitor_host_daily_script_path: /usr/local/sbin/vps-host-daily
+vpn_monitor_host_daily_schedule: "*-*-* 00:00:00"
+
 # Telegram alerts. Credentials come from ansible-vault, never from here.
 vpn_monitor_alert_enabled: false
 vpn_monitor_alert_script_path: /usr/local/sbin/vpn-notify

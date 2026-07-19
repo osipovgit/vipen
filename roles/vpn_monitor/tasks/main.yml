@@ -105,6 +105,67 @@
     state: absent
   when: not (vpn_monitor_alert_enabled | bool)
 
+# Daily hypervisor digest. Requires both the monitor that produces the data and
+# the notifier that delivers it, so it is gated on all three switches.
+- name: Install VPS host daily digest script
+  ansible.builtin.template:
+    src: vps-host-daily.j2
+    dest: "{{ vpn_monitor_host_daily_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: vpn_monitor_daily_enabled | bool
+
+- name: Install VPS host daily digest service
+  ansible.builtin.template:
+    src: vps-host-daily.service.j2
+    dest: /etc/systemd/system/vps-host-daily.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd daemon
+  when: vpn_monitor_daily_enabled | bool
+
+- name: Install VPS host daily digest timer
+  ansible.builtin.template:
+    src: vps-host-daily.timer.j2
+    dest: /etc/systemd/system/vps-host-daily.timer
+    owner: root
+    group: root
+    mode: "0644"
+  register: vpn_monitor_daily_timer
+  notify: Reload systemd daemon
+  when: vpn_monitor_daily_enabled | bool
+
+# Turning the digest off has to actually stop it: an orphaned timer would keep
+# sending reports that no variable in the repository claims to enable.
+- name: Check whether a digest timer is installed
+  ansible.builtin.stat:
+    path: /etc/systemd/system/vps-host-daily.timer
+  register: vpn_monitor_daily_timer_file
+  when: not (vpn_monitor_daily_enabled | bool)
+
+- name: Stop the digest timer when disabled
+  ansible.builtin.systemd:
+    name: vps-host-daily.timer
+    state: stopped
+    enabled: false
+  when:
+    - not (vpn_monitor_daily_enabled | bool)
+    - vpn_monitor_daily_timer_file.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Remove digest files when disabled
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ vpn_monitor_host_daily_script_path }}"
+    - /etc/systemd/system/vps-host-daily.service
+    - /etc/systemd/system/vps-host-daily.timer
+  notify: Reload systemd daemon
+  when: not (vpn_monitor_daily_enabled | bool)
+
 # 2. Apply all unit-file changes with a single daemon-reload before any unit is
 #    enabled or started, so systemd already knows the freshly written units.
 - name: Reload systemd once for all monitor units
@@ -148,6 +209,26 @@
     state: started
   when:
     - vpn_monitor_host_enabled | bool
+    - not ansible_check_mode
+
+- name: Enable and start VPS host daily digest timer
+  ansible.builtin.systemd:
+    name: vps-host-daily.timer
+    enabled: true
+    state: started
+  when:
+    - vpn_monitor_daily_enabled | bool
+    - not ansible_check_mode
+
+# Same reason as the health timer: a running timer keeps its old schedule
+# through a daemon-reload, so a changed OnCalendar needs a restart to take hold.
+- name: Restart digest timer after schedule changes
+  ansible.builtin.systemd:
+    name: vps-host-daily.timer
+    state: restarted
+  when:
+    - vpn_monitor_daily_enabled | bool
+    - vpn_monitor_daily_timer.changed
     - not ansible_check_mode
 
 # 4. Diagnostic: run the health check once and surface the result.

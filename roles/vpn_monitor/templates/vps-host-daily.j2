@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+#
+# Daily digest of vps-host-monitor anomalies, sent as a single Telegram message.
+#
+# The monitor samples every 5 seconds, so a bad night on the hypervisor produces
+# hundreds of WARN lines - which is why it is deliberately not wired to alerting
+# directly. Aggregating a whole day into one message is the rate limiter: the
+# upper bound is one message per day, by construction rather than by policy.
+#
+# Silence still means "nothing happened": a day without anomalies sends nothing.
+#
+# Runs after midnight and reports the day that just ended. Same design rules as
+# vpn-notify: every failure path exits 0, because a digest must never be able to
+# take monitoring down with it.
+set -u
+
+# cpu_steal_pct is a decimal fraction. Under a locale that uses a comma, awk
+# both parses "31.07" as 31 and prints it back with a comma - silently losing
+# the number that the whole report is about. Pin the numeric format instead of
+# trusting whatever locale the timer inherits.
+export LC_ALL=C
+
+notify="{{ vpn_monitor_alert_script_path }}"
+
+log() { logger -t vps-host-daily "$1"; }
+
+day="$(date -d yesterday +%Y-%m-%d)"
+
+# Whole previous day, in the server's own timezone: "yesterday" and "today" are
+# systemd time specs meaning local midnight, the same boundary the timer fires
+# on. Reading the journal by tag keeps this independent of the monitor's format.
+warnings="$(journalctl -t vps-host-monitor --since yesterday --until today \
+  -o short-iso --no-pager 2>/dev/null | grep 'status=WARN' || true)"
+
+if [ -z "$warnings" ]; then
+  log "status=OK day=${day} anomalies=0"
+  exit 0
+fi
+
+# One pass over the day: totals, worst values and a per-hour histogram. The
+# histogram is the part that matters for a hosting complaint - it shows whether
+# the trouble was one burst or spread across the night.
+summary="$(printf '%s\n' "$warnings" | awk '
+  {
+    total++
+    hour = substr($1, 12, 2)
+    per_hour[hour]++
+    if (first == "") first = substr($1, 12, 8)
+    last = substr($1, 12, 8)
+    for (i = 1; i <= NF; i++) {
+      if ($i ~ /^scheduler_delay_ms=/) {
+        split($i, kv, "=")
+        if (kv[2] + 0 > max_delay) max_delay = kv[2] + 0
+      }
+      if ($i ~ /^cpu_steal_pct=/) {
+        split($i, kv, "=")
+        if (kv[2] + 0 > max_steal) max_steal = kv[2] + 0
+      }
+    }
+  }
+  END {
+    printf "Anomalies: %d (from %s to %s)\n", total, first, last
+    printf "Peak scheduler delay: %d ms\n", max_delay
+    printf "Peak CPU steal: %.2f%%\n", max_steal
+    printf "By hour:"
+    # Counting up gives chronological order without sorting the array.
+    for (h = 0; h < 24; h++) {
+      slot = sprintf("%02d", h)
+      if (slot in per_hour) printf " %s:00 x%d", slot, per_hour[slot]
+    }
+    printf "\n"
+  }
+')"
+
+count="$(printf '%s\n' "$warnings" | wc -l | tr -d ' ')"
+log "status=REPORT day=${day} anomalies=${count}"
+
+if [ ! -x "$notify" ]; then
+  # Alerting is off or unconfigured. The digest still belongs in the journal.
+  log "status=SKIP reason=notify_unavailable"
+  printf '%s\n' "$summary"
+  exit 0
+fi
+
+"$notify" --report "hypervisor anomalies on ${day}" "${summary}
+Details: journalctl -t vps-host-monitor --since \"${day} 00:00\" --until \"${day} 23:59\"" || true

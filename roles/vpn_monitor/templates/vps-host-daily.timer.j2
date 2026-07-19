@@ -1,0 +1,15 @@
+[Unit]
+Description=Send the daily VPS hypervisor digest
+
+[Timer]
+OnCalendar={{ vpn_monitor_host_daily_schedule }}
+# The digest covers a whole finished day, so a few minutes of jitter change
+# nothing - and midnight on a 1 vCPU VPS already belongs to logrotate and
+# dpkg-db-backup. Still well inside the reported day's boundary.
+RandomizedDelaySec=5min
+# Catch up after downtime rather than skipping: a missing digest is
+# indistinguishable from a quiet day, which is exactly the wrong signal.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily digest of VPS hypervisor anomalies
+After=systemd-journald.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ vpn_monitor_host_daily_script_path }}
+StandardOutput=null
+StandardError=journal
