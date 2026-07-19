@@ -154,6 +154,38 @@ if [ -n "$failed_units" ]; then
   mark_warn "failed_units=${failed_units}"
 fi
 
+# Security posture. Both of these degrade without ever failing, so the check
+# above cannot see them: `ufw disable` leaves ufw.service happily "active", and
+# a stopped fail2ban is merely inactive. WARN rather than FAIL on purpose - the
+# VPN keeps serving traffic, and FAIL would feed the auto-restart path, which
+# would bounce the container over a problem restarting cannot fix.
+#
+# Ask ufw itself rather than systemd, for the reason above. A missing binary
+# fails the pipeline and lands in the same branch, which is the answer we want.
+if ufw status 2>/dev/null | grep -q '^Status: active'; then
+  messages+=("ufw=active")
+else
+  mark_warn "ufw_inactive"
+fi
+
+fail2ban_state="$(systemctl is-active fail2ban 2>/dev/null || true)"
+if [ "$fail2ban_state" = "active" ]; then
+  messages+=("fail2ban=active")
+else
+  mark_warn "fail2ban=${fail2ban_state:-unknown}"
+fi
+
+# Clock drift is the quietest failure mode in this list: REALITY authenticates
+# with a timestamp, so once the clock slides far enough the server starts
+# rejecting new handshakes while the container, the ports and the xray process
+# all still look perfectly healthy. Reads the kernel sync flag, so it is true
+# for whichever NTP client disciplines the clock, not just systemd-timesyncd.
+if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]; then
+  messages+=("time_sync=ok")
+else
+  mark_warn "time_unsynced"
+fi
+
 # Informational metrics. These never change status; they add visibility for
 # diagnosing "sometimes slow / times out" without needing a heavier monitor.
 load1="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
