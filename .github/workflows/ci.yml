@@ -25,10 +25,11 @@ jobs:
           key: pre-commit-${{ env.pythonLocation }}-${{ hashFiles('.pre-commit-config.yaml') }}
 
       # pre-commit pins the linter versions (see .pre-commit-config.yaml), so CI
-      # matches a local `pre-commit run`. ansible-core is needed for syntax-check.
+      # matches a local `pre-commit run`. ansible-core is needed for syntax-check
+      # and to render the shell templates before they are linted.
       - run: python -m pip install --upgrade pre-commit ansible-core
 
-      - name: pre-commit (yamllint, ansible-lint, shellcheck, gitleaks)
+      - name: pre-commit (yamllint, ansible-lint, shellcheck incl. templates, gitleaks)
         run: pre-commit run --all-files --show-diff-on-failure --color=always
 
       - name: Ansible syntax-check (example inventory)

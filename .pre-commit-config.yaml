@@ -37,6 +37,10 @@ repos:
       - id: shellcheck-templates
         name: shellcheck (rendered shell templates)
         entry: tests/shellcheck-templates.sh
-        language: system
+        language: python
+        # Pins the linter the same way every other hook here does. The runner
+        # image ships shellcheck 0.9.0 in /usr/bin; this keeps the templates on
+        # the same 0.10.0 as the plain .sh files, locally and in CI alike.
+        additional_dependencies: ["shellcheck-py==0.10.0.1"]
         pass_filenames: false
         files: ^(roles/.+\.j2|inventories/production/(group_vars/.+|secrets\.example\.yml)|tests/.+)$

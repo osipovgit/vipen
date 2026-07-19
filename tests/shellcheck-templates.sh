@@ -7,22 +7,16 @@
 # VPN is healthy as the only unchecked code in the repository - a typo there
 # does not fail any lint and surfaces as monitoring quietly lying.
 #
-# So render them first, then check the result. Wired into .pre-commit-config.yaml,
-# which is also what CI runs; safe to run by hand at any time.
+# So render them first, then check the result. Normally invoked through the
+# pre-commit hook, which is what CI runs too; that hook also supplies a pinned
+# linter, so its version never drifts from the one used for plain .sh files.
+# Standalone runs need shellcheck on PATH: pip install shellcheck-py.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 
-# Prefer the local binary; fall back to the same pinned image that the existing
-# hook already pulls, so this needs nothing pre-commit did not need before.
-if command -v shellcheck >/dev/null 2>&1; then
-  run_shellcheck() { shellcheck "$@"; }
-elif docker info >/dev/null 2>&1; then
-  run_shellcheck() {
-    docker run --rm -v "${render_dir}:/mnt" -w /mnt koalaman/shellcheck:v0.10.0 "$@"
-  }
-else
-  printf 'shellcheck-templates: need the shellcheck binary or a running Docker daemon\n' >&2
+if ! command -v shellcheck >/dev/null 2>&1; then
+  printf 'shellcheck-templates: shellcheck not found - run me via pre-commit, or pip install shellcheck-py\n' >&2
   exit 1
 fi
 
@@ -39,4 +33,4 @@ fi
 
 # Relative paths so the report names the script, not a temporary directory.
 cd "$render_dir"
-run_shellcheck ./*
+shellcheck ./*
