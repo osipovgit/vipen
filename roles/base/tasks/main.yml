@@ -8,6 +8,9 @@
       - gnupg
       - logrotate
       - openssh-server
+      - python3-debian
+      - iproute2
+      - kmod
       - python3-apt
       - ufw
     update_cache: true

@@ -5,21 +5,24 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
 
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ env.pythonLocation }}-${{ hashFiles('.pre-commit-config.yaml') }}
@@ -27,10 +30,13 @@ jobs:
       # pre-commit pins the linter versions (see .pre-commit-config.yaml), so CI
       # matches a local `pre-commit run`. ansible-core is needed for syntax-check
       # and to render the shell templates before they are linted.
-      - run: python -m pip install --upgrade pre-commit ansible-core
+      - run: python -m pip install -r requirements-dev.txt
 
       - name: pre-commit (yamllint, ansible-lint, shellcheck incl. templates, gitleaks)
         run: pre-commit run --all-files --show-diff-on-failure --color=always
+
+      - name: Offline regression tests (synthetic data, no services or network)
+        run: python -m unittest discover -s tests -p "test_*.py" -v
 
       - name: Ansible syntax-check (example inventory)
         run: >-
@@ -38,27 +44,30 @@ jobs:
           -i inventories/production/hosts.example.yml
           site.yml --syntax-check
 
-  # The only job that runs the roles instead of reading them. Everything above
-  # checks text; this checks behaviour - most importantly that a second converge
-  # reports changed=0. Runners ship Docker, so no service container is needed.
+  # Real systemd role convergence and idempotence on a disposable hosted runner.
+  # Offline behavior/fault tests above cover the other application boundaries.
   molecule:
-    runs-on: ubuntu-latest
+    # Privileged systemd tests run only on an ephemeral hosted runner.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
 
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/pip
           key: molecule-${{ env.pythonLocation }}-${{ hashFiles('molecule/requirements.txt') }}
 
-      - run: python -m pip install --upgrade -r molecule/requirements.txt
+      - run: python -m pip install -r molecule/requirements.txt
 
       # Molecule verifies the driver's collections are present before it starts,
       # so this cannot be left to the scenario's own dependency step.
@@ -68,16 +77,19 @@ jobs:
         run: molecule test
 
   secret-scan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
-      issues: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: gitleaks (full history)
-        uses: gitleaks/gitleaks-action@v3
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_SUMMARY: "true"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

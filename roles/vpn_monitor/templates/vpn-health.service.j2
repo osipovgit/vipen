@@ -5,6 +5,8 @@ After=docker.service network-online.target
 
 [Service]
 Type=oneshot
+TimeoutStartSec={{ vpn_monitor_service_timeout_seconds }}
+UMask=0077
 ExecStart={{ vpn_monitor_script_path }}
 StandardOutput=null
 StandardError=journal

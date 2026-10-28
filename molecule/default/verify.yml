@@ -77,15 +77,14 @@
       changed_when: false
       register: verify_sshd_effective
 
-    # Note the value on permitrootlogin: the role writes `prohibit-password`,
-    # but `sshd -T` reports the exact synonym `without-password`, which is the
-    # token OpenSSH canonicalises to. Asserting the written spelling here fails
-    # against a correctly configured server.
+    # OpenSSH versions print either spelling for the same key-only root policy.
     - name: SSH hardening is in effect, not merely on disk
       ansible.builtin.assert:
         that:
           - "'passwordauthentication no' in verify_sshd_effective.stdout_lines"
           - "'kbdinteractiveauthentication no' in verify_sshd_effective.stdout_lines"
-          - "'permitrootlogin without-password' in verify_sshd_effective.stdout_lines"
+          - >-
+            'permitrootlogin without-password' in verify_sshd_effective.stdout_lines or
+            'permitrootlogin prohibit-password' in verify_sshd_effective.stdout_lines
           - "'maxauthtries 3' in verify_sshd_effective.stdout_lines"
         fail_msg: "sshd drop-in is on disk but not in effect - check the Include line"

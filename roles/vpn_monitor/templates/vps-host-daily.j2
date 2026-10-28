@@ -5,14 +5,14 @@
 # The monitor samples every 5 seconds, so a bad night on the hypervisor produces
 # hundreds of WARN lines - which is why it is deliberately not wired to alerting
 # directly. Aggregating a whole day into one message is the rate limiter: the
-# upper bound is one message per day, by construction rather than by policy.
+# successful deliveries are recorded by day; failed/uncertain sends can retry.
 #
-# Silence still means "nothing happened": a day without anomalies sends nothing.
+# Days with samples but no anomalies send nothing. Missing coverage is an error.
 #
-# Runs after midnight and reports the day that just ended. Same design rules as
-# vpn-notify: every failure path exits 0, because a digest must never be able to
-# take monitoring down with it.
-set -u
+# Runs after midnight. Delivery failures remain visible and can be retried.
+# A private day marker suppresses repeated successful sends after a restart.
+set -uo pipefail
+umask 077
 
 # cpu_steal_pct is a decimal fraction. Under a locale that uses a comma, awk
 # both parses "31.07" as 31 and prints it back with a comma - silently losing
@@ -20,20 +20,33 @@ set -u
 # trusting whatever locale the timer inherits.
 export LC_ALL=C
 
-notify="{{ vpn_monitor_alert_script_path }}"
+notify={{ vpn_monitor_alert_script_path | quote }}
 
 log() { logger -t vps-host-daily "$1"; }
 
 day="$(date -d yesterday +%Y-%m-%d)"
 
-# Whole previous day, in the server's own timezone: "yesterday" and "today" are
-# systemd time specs meaning local midnight, the same boundary the timer fires
-# on. Reading the journal by tag keeps this independent of the monitor's format.
-warnings="$(journalctl -t vps-host-monitor --since yesterday --until today \
-  -o short-iso --no-pager 2>/dev/null | grep 'status=WARN' || true)"
+state_dir={{ vpn_monitor_digest_state_dir | quote }}
+mkdir -p "$state_dir"
+chmod 0700 "$state_dir"
+exec 9>"$state_dir/lock"
+flock -n 9 || exit 0
+[ -f "$state_dir/$day.sent" ] && exit 0
+if journal="$(timeout {{ vpn_monitor_command_timeout_seconds }} journalctl -q -t vps-host-monitor --since yesterday --until today -o short-iso --no-pager 2>/dev/null)"; then
+  warnings="$(printf '%s\n' "$journal" | grep 'status=WARN' || true)"
+else
+  log "status=FAIL reason=journal_unavailable"
+  exit 1
+fi
+# An empty journal is missing coverage, not proof of an incident-free day.
+if ! printf '%s\n' "$journal" | grep -Eq 'status=(SUMMARY|WARN)'; then
+  log "status=FAIL reason=monitor_samples_missing"
+  exit 1
+fi
 
 if [ -z "$warnings" ]; then
   log "status=OK day=${day} anomalies=0"
+  touch "$state_dir/$day.sent"
   exit 0
 fi
 
@@ -79,8 +92,14 @@ if [ ! -x "$notify" ]; then
   # Alerting is off or unconfigured. The digest still belongs in the journal.
   log "status=SKIP reason=notify_unavailable"
   printf '%s\n' "$summary"
-  exit 0
+  exit 1
 fi
 
-"$notify" --report "hypervisor anomalies on ${day}" "${summary}
-Details: journalctl -t vps-host-monitor --since \"${day} 00:00\" --until \"${day} 23:59\"" || true
+if "$notify" --report "hypervisor anomalies on ${day}" "${summary}
+Details: journalctl -t vps-host-monitor --since \"${day} 00:00\" --until \"${day} 23:59\""; then
+  touch "$state_dir/$day.sent"
+  find "$state_dir" -name "*.sent" -mtime +90 -delete
+else
+  log "status=FAIL reason=delivery_failed"
+  exit 1
+fi

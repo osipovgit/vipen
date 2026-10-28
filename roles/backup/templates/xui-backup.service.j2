@@ -3,6 +3,8 @@ Description=3x-ui database backup
 
 [Service]
 Type=oneshot
+TimeoutStartSec={{ xui_backup_timeout_seconds | int + 10 }}
+UMask=0077
 ExecStart={{ xui_backup_script_path }}
 StandardOutput=null
 StandardError=journal

@@ -4,68 +4,42 @@
 
 [![CI](https://github.com/osipovgit/vipen/actions/workflows/ci.yml/badge.svg)](https://github.com/osipovgit/vipen/actions/workflows/ci.yml)
 
-Ansible pipeline that deploys [3x-ui](https://github.com/MHSanaei/3x-ui) (management panel + Xray VPN server) on a Debian/Ubuntu host.
+Ansible deployment and monitoring for [3x-ui](https://github.com/MHSanaei/3x-ui) on Debian/Ubuntu. Create VPN inbounds and clients through the panel or restore an existing database.
 
-The pipeline **does not create VPN connections or users** — you add them in the panel manually or restore them from a database backup.
+The default mode updates the application on an already prepared host. SSH, UFW, Docker Engine and host configuration require `vipen_manage_host: true`. OS upgrades and kernel tuning are separate opt-ins.
 
-## What it configures
+## Deployment properties
 
-- 🔒 **Server hardening** — SSH key-only access, UFW, fail2ban, panel closed to the outside (access via SSH tunnel).
-- 🐳 **Docker environment** — log rotation, `live-restore`, database snapshot before updates.
-- ⚡ **Network optimization** — `fq` + BBR, increased `nf_conntrack_max`.
-- 💾 **Backups** — daily on-server database snapshot with rotation, off-host copy of `x-ui.db` to your local machine, restore on a new server.
-- 📊 **Monitoring** — health check every minute, signs of hypervisor overload (CPU steal, VM latency), tools for manual diagnostics.
-- 🔔 **Alerts** — Telegram push on VPN failure and recovery (only on state changes), daily report on hypervisor problems (one summary per day).
+- 3x-ui **3.11.0**, pinned by tag and OCI digest. A database copy is migrated in a network-disabled container before stopping the service.
+- A recovery directory retains the previous database, Compose file, certificates and local image ID. Failed deployment attempts restore the previous database/image pair. Updates require a short maintenance window.
+- The panel binds to loopback. Fresh installations require explicit administrator credentials and start with subscriptions disabled. Public subscriptions require TLS.
+- Existing REALITY settings are preserved. An override must select exactly one inbound; ambiguous port selectors fail atomically.
+- UFW is never reset. Only labelled Vipen rules are reconciled, with a systemd rollback watchdog and a fresh SSH connection check.
+- Daily consistent database snapshots and recovery archives. Remote full playbook runs fetch a pre-update archive to the controller; scheduled backups remain on the server.
+- Monitoring discovers enabled listeners from the database, bounds external commands and reports unavailable data. Telegram alerts are optional.
 
-## Requirements
+## Requirements and use
 
-- **Target server:** Debian/Ubuntu with `root` access via SSH key.
-- **Machine you run it from:** Ansible (core ≥ 2.16), Python 3. For remote runs — an SSH key to access the server.
+Controller: Python 3.12–3.14 and `ansible-core==2.21.5` (CI uses Python 3.14). Target: key-based root access, Python 3, systemd, Debian 12/13 or Ubuntu 24.04/26.04 on amd64/arm64. See [test coverage](docs/testing.md) before assuming platform certification.
 
-## Quick start
-
-The pipeline can be run in two ways: remotely over SSH from your machine, or locally on the server itself.
-
-Pipeline parameters live in a single file — `inventories/production/group_vars/vpn_servers.yml`; server connection details are set in the inventory.
-
-Do not put client UUIDs, REALITY keys, or subscription links into `group_vars` — they belong in the database, and a public fork would leak them.
-
-**Run all commands from the repository root.**
-
-### Scenario 1. Remotely over SSH
+Read the [migration guide](docs/migration.md) before upgrading an existing server, or [setup guide](docs/setup.md) for a new host. Detailed operational documentation is currently in Russian.
 
 ```bash
-cp inventories/production/hosts.example.yml \
-   inventories/production/hosts.yml
-# add the server IP and the path to your SSH key to hosts.yml, then:
-ansible-playbook site.yml --check --diff    # preview (dry run)
-ansible-playbook site.yml                   # apply
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+cp inventories/production/hosts.example.yml inventories/production/hosts.yml
+cp inventories/production/secrets.example.yml inventories/production/secrets.yml
+# Fill both files, then encrypt the secrets:
+ansible-vault encrypt inventories/production/secrets.yml
+ansible-playbook site.yml --syntax-check --ask-vault-pass
+ansible-playbook site.yml --check --ask-vault-pass
+# After isolated rehearsal and a reviewed recovery plan:
+ansible-playbook site.yml --ask-vault-pass --limit vipen
 ```
 
-See [“Before the first run”](docs/setup.md#перед-первым-запуском) and [“Applying”](docs/setup.md#применение) for details.
+Check mode does not perform image pulls, migrations, restoration or network changes. Applying without a real secrets file is refused. Keep databases, client identifiers, private keys and subscription URLs out of Git and public issues.
 
-### Scenario 2. Locally on the server
+See [contributing](CONTRIBUTING.md), [security](SECURITY.md), [changelog](CHANGELOG.md), [review fixes](docs/review-fixes-2026-10-26.md) and [MIT license](LICENSE).
 
-Requires `ansible-core` and `python3` installed on the server; run as root.
-
-```bash
-cp inventories/production/hosts.local.example.yml \
-   inventories/production/hosts.local.yml
-# add your public SSH key to hosts.local.yml (ssh_authorized_keys), then:
-ansible-playbook -i inventories/production/hosts.local.yml site.yml --check --diff  # preview (dry run)
-ansible-playbook -i inventories/production/hosts.local.yml site.yml                 # apply
-```
-
-In this case the `x-ui.db` backup stays on the server itself — there will be no separate off-host copy.
-
-See [“Running locally (on the server itself)”](docs/setup.md#локальный-запуск-на-самом-сервере) for details.
-
-## Documentation
-
-**Full setup, roles, and scenarios guide — in [`docs/setup.md`](docs/setup.md).**
-
-It covers: pipeline parameters, panel access, updating and rolling back 3x-ui, restoring on a new server, monitoring and metrics, UFW and SSH.
-
-**Telegram alerts — in [`docs/alerting.md`](docs/alerting.md):** what counts as `FAIL` and what as `WARN`, creating the bot, storing the token in Ansible Vault.
-
-Working conventions and diagnostic scenarios — in [`AGENTS.md`](AGENTS.md).
+Local port/process checks cannot prove a working client handshake. Production operation also needs an external VPN probe, missed-heartbeat alerting and tested off-host backups; these are configured separately.

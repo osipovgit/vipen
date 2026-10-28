@@ -7,3 +7,6 @@ healthcheck_docker_since: 30m
 healthcheck_container_name: 3xui_app
 healthcheck_monitor_timer_name: vpn-health.timer
 healthcheck_monitor_script_path: /usr/local/sbin/vpn-health-check
+
+healthcheck_command_timeout_seconds: 15
+healthcheck_monitor_freshness_seconds: 300

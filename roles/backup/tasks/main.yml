@@ -1,218 +1,118 @@
 ---
-- name: Check 3x-ui database before backup
-  ansible.builtin.stat:
-    path: "{{ xui_db_dir }}/x-ui.db"
-  register: backup_xui_db
-
-- name: Ensure server-side backup directory exists
+- name: Ensure private backup and helper directories exist
   ansible.builtin.file:
-    path: "{{ xui_backup_dir }}"
+    path: "{{ item }}"
     state: directory
     owner: root
     group: root
     mode: "0700"
-  when:
-    - backup_xui_db.stat.exists
-    - not ansible_check_mode
+  loop:
+    - "{{ xui_backup_dir }}"
+    - /usr/local/libexec/vipen
 
-# A live file copy of an open SQLite DB (WAL/journal) can be inconsistent. Use
-# the SQLite online backup API to get a consistent snapshot and verify it with
-# PRAGMA integrity_check before it leaves the box. No DB content is printed.
-- name: Create consistent, integrity-checked SQLite snapshot
-  ansible.builtin.command:
-    argv:
-      - python3
-      - -c
-      - |
-        import sqlite3, sys
-        src, dst = sys.argv[1], sys.argv[2]
-        source = sqlite3.connect("file:%s?mode=ro" % src, uri=True, timeout=30)
-        dest = sqlite3.connect(dst)
-        try:
-            with dest:
-                source.backup(dest)
-            result = dest.execute("pragma integrity_check").fetchone()
-        finally:
-            source.close()
-            dest.close()
-        status = result[0] if result else "unknown"
-        if status != "ok":
-            sys.stderr.write("integrity_check=%s\n" % status)
-            raise SystemExit(2)
-        print("integrity_check=ok")
-      - "{{ xui_db_dir }}/x-ui.db"
-      - "{{ backup_snapshot_path }}"
-  register: backup_snapshot
-  changed_when: true
-  when:
-    - backup_xui_db.stat.exists
-    - not ansible_check_mode
-
-- name: Restrict snapshot permissions
-  ansible.builtin.file:
-    path: "{{ backup_snapshot_path }}"
-    owner: root
-    group: root
-    mode: "0600"
-  when:
-    - backup_xui_db.stat.exists
-    - not ansible_check_mode
-
-# ---------------------------------------------------------------------------
-# Remote run (Ansible on another machine): pull the verified snapshot OFF-HOST
-# to the control node, then drop the server-side snapshot (no extra on-server
-# copy, matching the original off-host behaviour).
-# ---------------------------------------------------------------------------
-- name: Create local off-host backup directory
-  ansible.builtin.file:
-    path: "{{ backup_local_dir }}"
-    state: directory
-    mode: "0700"
-  delegate_to: localhost
-  become: false
-  when:
-    - not run_is_local | bool
-    - backup_xui_db.stat.exists
-    - not ansible_check_mode
-
-- name: Fetch verified snapshot off-host
-  ansible.builtin.fetch:
-    src: "{{ backup_snapshot_path }}"
-    dest: "{{ backup_local_dir }}/x-ui.db"
-    flat: true
-  when:
-    - not run_is_local | bool
-    - backup_xui_db.stat.exists
-    - not ansible_check_mode
-
-- name: Restrict local database backup permissions
-  ansible.builtin.file:
-    path: "{{ backup_local_dir }}/x-ui.db"
-    mode: "0600"
-  delegate_to: localhost
-  become: false
-  when:
-    - not run_is_local | bool
-    - backup_xui_db.stat.exists
-    - not ansible_check_mode
-
-- name: Store remote backup metadata locally
+- name: Install database and recovery bundle helpers
   ansible.builtin.copy:
-    dest: "{{ backup_local_dir }}/README.txt"
-    mode: "0600"
-    content: |
-      Host: {{ inventory_hostname }}
-      Source: {{ xui_db_dir }}/x-ui.db
-      Created: {{ ansible_facts['date_time']['iso8601'] }}
-      Method: sqlite3 online backup + integrity_check
-      Sensitive: this database contains VPN clients, UUIDs, passwords, and panel settings.
-  delegate_to: localhost
-  become: false
-  when:
-    - not run_is_local | bool
-    - backup_xui_db.stat.exists
-    - not ansible_check_mode
+    src: "{{ role_path }}/../xui/files/{{ item }}"
+    dest: "/usr/local/libexec/vipen/{{ item }}"
+    owner: root
+    group: root
+    mode: "0700"
+  loop: [xui_db.py, xui_backup.py]
 
-- name: Remove server-side snapshot after off-host fetch
-  ansible.builtin.file:
-    path: "{{ backup_snapshot_path }}"
-    state: absent
-  when:
-    - not run_is_local | bool
-    - backup_xui_db.stat.exists
-    - not ansible_check_mode
-
-# ---------------------------------------------------------------------------
-# Local run (Ansible on the server itself): control node == target, so an
-# off-host copy is impossible. The verified snapshot stays on the server.
-# NOTE: same disk, this is NOT off-host protection.
-# ---------------------------------------------------------------------------
-- name: Warn that a local run is not an off-host backup
-  ansible.builtin.debug:
-    msg: >-
-      Local run: consistent on-host DB snapshot written to {{ backup_snapshot_path }}.
-      This is on the same disk and is NOT an off-host backup;
-      copy it to another machine for real protection.
-  when:
-    - run_is_local | bool
-    - backup_xui_db.stat.exists
-
-# ---------------------------------------------------------------------------
-# Scheduled on-host backup (systemd timer).
-#
-# Everything above only runs when a human runs the playbook. Between runs the
-# database is unprotected, and clients added through the panel exist in exactly
-# one place. The timer closes that window.
-#
-# This is same-disk protection: it covers DB corruption, a bad 3x-ui migration
-# and a deleted client, NOT the loss of the VPS. Off-host copies still come from
-# running the playbook.
-# ---------------------------------------------------------------------------
-- name: Install scheduled backup script
+- name: Install bounded backup script
   ansible.builtin.template:
     src: xui-backup.j2
     dest: "{{ xui_backup_script_path }}"
     owner: root
     group: root
-    mode: "0755"
-  when: xui_backup_timer_enabled | bool
+    mode: "0700"
 
-- name: Install scheduled backup systemd service
+- name: Check existing database
+  ansible.builtin.stat:
+    path: "{{ xui_db_dir }}/x-ui.db"
+  register: backup_xui_db
+
+- name: Save a consistent recovery bundle before deployment
+  ansible.builtin.command: "{{ xui_backup_script_path }}"
+  register: backup_bundle
+  changed_when: true
+  when:
+    - backup_xui_db.stat.exists
+    - not ansible_check_mode
+
+- name: Keep an off-host recovery bundle on remote runs
+  when:
+    - not (run_is_local | bool)
+    - backup_xui_db.stat.exists
+    - not ansible_check_mode
+  block:
+    - name: Create private controller backup directory
+      ansible.builtin.file:
+        path: "{{ backup_local_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+
+    - name: Fetch verified database and recovery archive
+      ansible.builtin.fetch:
+        src: "{{ item }}"
+        dest: "{{ backup_local_dir }}/"
+        flat: true
+      loop:
+        - "{{ (backup_bundle.stdout | from_json).database }}"
+        - "{{ (backup_bundle.stdout | from_json).bundle }}"
+
+    - name: Restrict controller backup files
+      ansible.builtin.file:
+        path: "{{ backup_local_dir }}/{{ item | basename }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      loop:
+        - "{{ (backup_bundle.stdout | from_json).database }}"
+        - "{{ (backup_bundle.stdout | from_json).bundle }}"
+
+- name: Explain the remaining off-host backup requirement on local runs
+  ansible.builtin.debug:
+    msg: "Recovery bundles in {{ xui_backup_dir }} are on the same disk. Configure encrypted off-host copies and test restoration."
+  when: run_is_local | bool
+
+- name: Install scheduled backup service and timer
   ansible.builtin.template:
-    src: xui-backup.service.j2
-    dest: /etc/systemd/system/xui-backup.service
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
     owner: root
     group: root
     mode: "0644"
+  loop: [xui-backup.service, xui-backup.timer]
+  register: backup_units
   when: xui_backup_timer_enabled | bool
 
-- name: Install scheduled backup systemd timer
-  ansible.builtin.template:
-    src: xui-backup.timer.j2
-    dest: /etc/systemd/system/xui-backup.timer
-    owner: root
-    group: root
-    mode: "0644"
-  register: backup_timer_unit
-  when: xui_backup_timer_enabled | bool
-
-# daemon_reload here rather than a handler: systemd must already know the units
-# written above before this very task enables them.
-- name: Enable and start scheduled backup timer
+- name: Enable scheduled backup timer and apply schedule changes
   ansible.builtin.systemd:
     name: xui-backup.timer
     enabled: true
-    state: started
+    state: "{{ 'restarted' if backup_units.changed else 'started' }}"
     daemon_reload: true
   when:
     - xui_backup_timer_enabled | bool
     - not ansible_check_mode
 
-# A running timer keeps its old schedule after a daemon-reload; restart it so a
-# changed xui_backup_timer_schedule takes effect now.
-- name: Restart scheduled backup timer after schedule changes
-  ansible.builtin.systemd:
-    name: xui-backup.timer
-    state: restarted
-  when:
-    - xui_backup_timer_enabled | bool
-    - backup_timer_unit.changed
-    - not ansible_check_mode
-
-- name: Check for an existing scheduled backup timer
+- name: Detect disabled backup units
   ansible.builtin.stat:
-    path: /etc/systemd/system/xui-backup.timer
-  register: backup_timer_present
+    path: "/etc/systemd/system/{{ item }}"
+  loop: [xui-backup.timer, xui-backup.service]
+  register: backup_disabled_units
   when: not (xui_backup_timer_enabled | bool)
 
-# Make the toggle actually turn the feature off instead of leaving an orphaned
-# timer running with the last-applied schedule.
-- name: Disable scheduled backup timer when turned off
+- name: Stop both the timer and an active backup when disabled
   ansible.builtin.systemd:
-    name: xui-backup.timer
+    name: "{{ item.item }}"
     enabled: false
     state: stopped
+  loop: "{{ backup_disabled_units.results | default([]) }}"
   when:
     - not (xui_backup_timer_enabled | bool)
-    - backup_timer_present.stat.exists | default(false)
+    - item.stat.exists | default(false)
     - not ansible_check_mode

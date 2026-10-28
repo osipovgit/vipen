@@ -1,7 +1,8 @@
 ---
-network_tuning_sysctl_tuning_enabled: true
+network_tuning_sysctl_tuning_enabled: false
 network_tuning_sysctl_settings:
   net.core.default_qdisc: fq
   net.ipv4.tcp_congestion_control: bbr
   net.netfilter.nf_conntrack_max: "65536"
-network_tuning_apply_qdisc_to_default_route: true
+network_tuning_apply_qdisc_to_default_route: false
+network_tuning_allow_conntrack_decrease: false

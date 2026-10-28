@@ -1,67 +1,70 @@
 ---
-- name: Reset UFW
-  ansible.builtin.command: ufw --force reset
-  changed_when: true
+- name: Ensure firewall helper directory exists
+  ansible.builtin.file:
+    path: /usr/local/libexec/vipen
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install scoped firewall reconciler
+  ansible.builtin.copy:
+    src: ufw_rules.py
+    dest: /usr/local/libexec/vipen/ufw-rules
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install database inspection helper for independent firewall runs
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../xui/files/xui_db.py"
+    dest: "{{ xui_db_tool_path }}"
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Discover effective subscription state before changing firewall rules
+  ansible.builtin.command:
+    argv: [python3, "{{ xui_db_tool_path }}", inspect, "{{ xui_db_dir }}/x-ui.db"]
+  register: firewall_database
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Reconcile only Vipen-owned firewall rules
+  ansible.builtin.command:
+    argv: [python3, /usr/local/libexec/vipen/ufw-rules]
+    stdin: >-
+      {{ {'ssh_port': ssh_port | int, 'ssh_cidrs': ssh_admin_cidrs,
+          'tcp': (vpn_tcp_ports + ([(firewall_database.stdout | from_json).subscription_port] if (firewall_database.stdout | from_json).subscription_enabled else [])) | unique | list,
+          'udp': vpn_udp_ports, 'panel_port': panel_port | int,
+          'manage_defaults': firewall_manage_defaults | bool} | to_json }}
+  register: firewall_reconcile
+  changed_when: (firewall_reconcile.stdout | from_json).changed
+  when: not ansible_check_mode
+
+- name: Verify a fresh SSH connection before cancelling firewall rollback
+  ansible.builtin.command: /usr/bin/true
+  become: false
+  changed_when: false
+  vars:
+    ansible_ssh_args: >-
+      -o ControlMaster=no -o ControlPath=none -o BatchMode=yes
+      -o PreferredAuthentications=publickey -o PasswordAuthentication=no
+      -o KbdInteractiveAuthentication=no -o StrictHostKeyChecking=yes
   when:
-    - firewall_reset | bool
+    - firewall_reconcile.changed
+    - ansible_connection | default('ssh') == 'ssh'
     - not ansible_check_mode
 
-- name: Deny incoming by default
-  ansible.builtin.command: ufw default deny incoming
-  register: firewall_ufw_deny
-  changed_when: "'Default incoming policy changed' in firewall_ufw_deny.stdout"
-  when: not ansible_check_mode
-
-- name: Allow outgoing by default
-  ansible.builtin.command: ufw default allow outgoing
-  register: firewall_ufw_allow_out
-  changed_when: "'Default outgoing policy changed' in firewall_ufw_allow_out.stdout"
-  when: not ansible_check_mode
-
-- name: Allow SSH
-  ansible.builtin.command: "ufw allow from {{ item }} to any port {{ ssh_port }} proto tcp comment ssh"
-  loop: "{{ ssh_admin_cidrs }}"
-  register: firewall_ufw_ssh
-  changed_when: "'Rule added' in firewall_ufw_ssh.stdout"
-  when: not ansible_check_mode
-
-- name: Allow VPN TCP ports
-  ansible.builtin.command: "ufw allow {{ item }}/tcp comment vpn"
-  loop: "{{ vpn_tcp_ports }}"
-  register: firewall_ufw_tcp
-  changed_when: "'Rule added' in firewall_ufw_tcp.stdout"
-  when: not ansible_check_mode
-
-- name: Allow VPN UDP ports
-  ansible.builtin.command: "ufw allow {{ item }}/udp comment vpn"
-  loop: "{{ vpn_udp_ports }}"
-  register: firewall_ufw_udp
-  changed_when: "'Rule added' in firewall_ufw_udp.stdout"
-  when: not ansible_check_mode
-
-- name: Allow panel publicly only when explicitly enabled
-  ansible.builtin.command: "ufw allow {{ panel_port }}/tcp comment xui-panel"
-  register: firewall_ufw_panel
-  changed_when: "'Rule added' in firewall_ufw_panel.stdout"
+- name: Cancel firewall rollback after successful access verification
+  ansible.builtin.systemd:
+    name: vipen-firewall-rollback.timer
+    state: stopped
   when:
-    - panel_public | bool
+    - firewall_reconcile.changed
     - not ansible_check_mode
 
-- name: Deny panel port when not public
-  ansible.builtin.command: "ufw deny {{ panel_port }}/tcp comment xui-panel"
-  register: firewall_ufw_panel_deny
-  changed_when: "'Rule added' in firewall_ufw_panel_deny.stdout"
-  when:
-    - not panel_public | bool
-    - not ansible_check_mode
-
-- name: Enable UFW
-  ansible.builtin.command: ufw --force enable
-  register: firewall_ufw_enable
-  changed_when: "'Firewall is active' in firewall_ufw_enable.stdout"
-  when: not ansible_check_mode
-
-- name: Configure fail2ban sshd jail
+- name: Configure fail2ban SSH jail
   ansible.builtin.copy:
     dest: /etc/fail2ban/jail.d/sshd.local
     owner: root
@@ -87,10 +90,10 @@
     state: started
   when: not ansible_check_mode
 
-- name: Restart fail2ban after jail changes or firewall reset
+- name: Restart fail2ban after jail changes
   ansible.builtin.service:
     name: fail2ban
     state: restarted
   when:
-    - firewall_fail2ban_jail.changed or firewall_reset | bool
+    - firewall_fail2ban_jail.changed
     - not ansible_check_mode

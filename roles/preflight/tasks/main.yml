@@ -1,0 +1,154 @@
+---
+- name: Validate supported platform and safe configuration before changes
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == 'Debian'
+      - ansible_facts['service_mgr'] == 'systemd'
+      - ansible_facts['architecture'] in ['x86_64', 'aarch64']
+      - >-
+        (ansible_facts['distribution'] == 'Debian' and ansible_facts['distribution_major_version'] in ['12', '13'])
+        or (ansible_facts['distribution'] == 'Ubuntu' and ansible_facts['distribution_version'] in ['24.04', '26.04'])
+      - ansible_version.full is version('2.20', '>=')
+      - ansible_version.full is version('2.22', '<')
+      - not (firewall_reset | bool)
+      - not (panel_public | bool)
+      - xui_panel_listen == '127.0.0.1'
+      - panel_port | int > 0 and panel_port | int < 65536
+      - ssh_port | int > 0 and ssh_port | int < 65536
+      - panel_port | int != ssh_port | int
+      - panel_port | int not in (vpn_tcp_ports | map('int') | list)
+      - xui_backup_keep | int > 0
+      - xui_backup_timeout_seconds | int > 0
+      - vpn_monitor_failure_threshold | int > 0
+      - vpn_monitor_command_timeout_seconds | int > 0
+      - vpn_monitor_host_interval_seconds | int > 0
+      - xui_image is match('^ghcr.io/mhsanaei/3x-ui:v[^@]+@sha256:[0-9a-f]{64}$')
+      - xui_compose_dir is match('^/[a-zA-Z0-9_./-]+$')
+      - ssh_admin_cidrs | length > 0
+      - vpn_monitor_disk_warn_percent | int > 0
+      - vpn_monitor_disk_warn_percent | int < vpn_monitor_disk_fail_percent | int
+      - vpn_monitor_disk_fail_percent | int <= 100
+      - vpn_monitor_host_summary_seconds | int > 0
+      - vpn_monitor_alert_fail_after | int > 0
+      - vpn_monitor_alert_timeout_seconds | int > 0
+      - xui_deploy_timeout_seconds | int >= 30
+      - xui_container_pids_limit | int > 0
+      - xui_db_dir is match('^/[a-zA-Z0-9_./-]+$')
+      - xui_cert_dir is match('^/[a-zA-Z0-9_./-]+$')
+      - xui_backup_dir is match('^/[a-zA-Z0-9_./-]+$')
+      - xui_compose_project is match('^[a-z0-9][a-z0-9_-]*$')
+      - xui_container_name is match('^[a-zA-Z0-9][a-zA-Z0-9_.-]*$')
+      - not xui_container_fail2ban_enabled or 'NET_ADMIN' in xui_container_cap_add
+    fail_msg: Unsupported platform or unsafe settings. See docs/setup.md; no host changes have been made.
+
+- name: Require an explicit secrets file instead of example production settings
+  ansible.builtin.assert:
+    that: not (vipen_require_secrets_file | bool) or vipen_secrets_file == playbook_dir ~ '/inventories/production/secrets.yml'
+    fail_msg: Create and encrypt inventories/production/secrets.yml before applying this playbook.
+
+- name: Validate port lists and certificate filenames
+  ansible.builtin.assert:
+    that:
+      - item | string is match('^[0-9]+$')
+      - item | int > 0 and item | int < 65536
+  loop: "{{ vpn_tcp_ports + vpn_udp_ports + [xui_subscription_port] }}"
+
+- name: Require TLS configuration when enabling subscriptions
+  ansible.builtin.assert:
+    that:
+      - xui_subscription_cert_file is match('^[a-zA-Z0-9_.-]+$')
+      - xui_subscription_key_file is match('^[a-zA-Z0-9_.-]+$')
+      - xui_subscription_uri | length == 0 or xui_subscription_uri is match('^https://')
+      - xui_subscription_port | int != panel_port | int
+      - xui_subscription_port | int != ssh_port | int
+      - xui_subscription_port | int not in (vpn_tcp_ports | map('int') | list)
+  when: xui_subscription_enabled is not none and xui_subscription_enabled | bool
+  no_log: true
+
+- name: Read existing database presence
+  ansible.builtin.stat:
+    path: "{{ xui_db_dir }}/x-ui.db"
+  register: preflight_existing_db
+
+- name: Require explicit provisioning mode for a new installation
+  ansible.builtin.assert:
+    that: preflight_existing_db.stat.exists or vipen_manage_host | bool or xui_restore_db_enabled | bool
+    fail_msg: No existing database. Review the host and set vipen_manage_host=true for a new dedicated server.
+
+- name: Verify Docker is available when host provisioning is disabled
+  ansible.builtin.command: docker compose version
+  changed_when: false
+  check_mode: false
+  when: not (vipen_manage_host | bool)
+
+- name: Verify independent public-key access before host provisioning
+  ansible.builtin.command: /usr/bin/true
+  changed_when: false
+  become: false
+  check_mode: false
+  vars:
+    ansible_ssh_args: >-
+      -o ControlMaster=no -o ControlPath=none -o BatchMode=yes
+      -o PreferredAuthentications=publickey -o PasswordAuthentication=no
+      -o KbdInteractiveAuthentication=no -o StrictHostKeyChecking=yes
+  when:
+    - vipen_manage_host | bool
+    - ssh_connection_test_required | bool
+    - ansible_connection | default('ssh') == 'ssh'
+
+- name: Read current SSH configuration before host management
+  ansible.builtin.command: /usr/sbin/sshd -T
+  register: preflight_ssh_current
+  changed_when: false
+  check_mode: false
+  when: vipen_manage_host | bool
+
+- name: Refuse SSH port migration in a general deployment
+  ansible.builtin.assert:
+    that:
+      - "('port ' ~ (ssh_port | string)) in preflight_ssh_current.stdout_lines"
+      - run_is_local | bool or (ansible_port | default(22) | int == ssh_port | int)
+      - not (run_is_local | bool) or ssh_local_key_login_verified | bool
+    fail_msg: Keep the current SSH port. Port migration requires a separate two-stage procedure; local runs require a previously verified key login.
+  when: vipen_manage_host | bool
+
+- name: Validate CIDRs and preserve access for the connected administrator
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import ipaddress, json, sys
+        config = json.load(sys.stdin)
+        networks = [ipaddress.ip_network(v, strict=False) for v in config['cidrs']]
+        if config['client'] and not any(ipaddress.ip_address(config['client']) in n for n in networks):
+            raise SystemExit('Current SSH client is outside ssh_admin_cidrs; refusing firewall changes')
+    stdin: "{{ {'cidrs': ssh_admin_cidrs, 'client': (ansible_facts.get('env', {}).get('SSH_CONNECTION', '').split() | first | default(''))} | to_json }}"
+  changed_when: false
+  check_mode: false
+  when: vipen_manage_host | bool
+
+- name: Detect existing UFW binary
+  ansible.builtin.stat:
+    path: /usr/sbin/ufw
+  register: preflight_ufw_binary
+  when: vipen_manage_host | bool
+
+- name: Read existing firewall rules before provisioning
+  ansible.builtin.command: ufw status numbered
+  changed_when: false
+  check_mode: false
+  register: preflight_ufw_status
+  when:
+    - vipen_manage_host | bool
+    - preflight_ufw_binary.stat.exists
+
+- name: Refuse ambiguous legacy firewall ownership before changes
+  ansible.builtin.assert:
+    that:
+      - preflight_ufw_status.stdout is not search('(?m)#\\s*(ssh|vpn|xui-panel)\\s*$')
+      - "'Status: active' in preflight_ufw_status.stdout or firewall_manage_defaults | bool"
+    fail_msg: Review legacy rules and migrate their ownership first; see docs/migration.md. No host changes have been made.
+  when:
+    - vipen_manage_host | bool
+    - preflight_ufw_binary.stat.exists

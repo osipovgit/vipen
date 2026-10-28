@@ -1,4 +1,23 @@
 ---
+- name: Load BBR before checking available congestion controls
+  ansible.builtin.command: modprobe tcp_bbr
+  changed_when: false
+  when:
+    - network_tuning_sysctl_tuning_enabled | bool
+    - network_tuning_sysctl_settings.get('net.ipv4.tcp_congestion_control', '') == 'bbr'
+    - not ansible_check_mode
+
+- name: Persist the requested BBR module
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/vipen-bbr.conf
+    content: "tcp_bbr\n"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - network_tuning_sysctl_tuning_enabled | bool
+    - network_tuning_sysctl_settings.get('net.ipv4.tcp_congestion_control', '') == 'bbr'
+
 - name: Read available TCP congestion controls
   ansible.builtin.command: sysctl -n net.ipv4.tcp_available_congestion_control
   register: network_tuning_tcp_available_congestion_control
@@ -37,6 +56,26 @@
     - network_tuning_sysctl_settings['net.netfilter.nf_conntrack_max'] is defined
     - not ansible_check_mode
 
+- name: Read existing conntrack capacity before changing it
+  ansible.builtin.command: sysctl -n net.netfilter.nf_conntrack_max
+  register: network_tuning_conntrack_before
+  changed_when: false
+  when:
+    - network_tuning_sysctl_tuning_enabled | bool
+    - network_tuning_sysctl_settings['net.netfilter.nf_conntrack_max'] is defined
+    - not ansible_check_mode
+
+- name: Refuse an unintended conntrack capacity decrease
+  ansible.builtin.assert:
+    that: >-
+      network_tuning_allow_conntrack_decrease | bool or
+      network_tuning_sysctl_settings['net.netfilter.nf_conntrack_max'] | int >= network_tuning_conntrack_before.stdout | int
+    fail_msg: Requested conntrack capacity is below the current value; review it explicitly before tuning.
+  when:
+    - network_tuning_sysctl_tuning_enabled | bool
+    - network_tuning_sysctl_settings['net.netfilter.nf_conntrack_max'] is defined
+    - not ansible_check_mode
+
 - name: Configure VPN network sysctl tuning
   ansible.builtin.template:
     src: 99-vpn-performance.conf.j2
@@ -50,7 +89,7 @@
 - name: Apply effective VPN network sysctl tuning
   ansible.builtin.command: "sysctl -w {{ item.key }}={{ item.value }}"
   loop: "{{ network_tuning_sysctl_settings | dict2items }}"
-  changed_when: false
+  changed_when: network_tuning_sysctl_config.changed
   when:
     - network_tuning_sysctl_tuning_enabled | bool
     - not ansible_check_mode

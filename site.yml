@@ -4,13 +4,10 @@
   become: true
   gather_facts: true
 
-  # Secrets (alert credentials) come from an ansible-vault encrypted, gitignored
-  # secrets.yml. The committed example is the fallback so a fresh clone runs as
-  # before, with alerting simply inert. See docs/alerting.md.
+  vars:
+    vipen_secrets_file: "{{ lookup('ansible.builtin.first_found', [playbook_dir ~ '/inventories/production/secrets.yml', playbook_dir ~ '/inventories/production/secrets.example.yml']) }}"
   vars_files:
-    - "{{ lookup('ansible.builtin.first_found', [
-           playbook_dir ~ '/inventories/production/secrets.yml',
-           playbook_dir ~ '/inventories/production/secrets.example.yml']) }}"
+    - "{{ vipen_secrets_file }}"
 
   pre_tasks:
     # Freeze the run mode against the TARGET connection, once per play.
@@ -23,24 +20,32 @@
       tags: [always]
 
   roles:
+    - role: preflight
+      tags: [always]
     - role: base
+      when: vipen_manage_host | bool
       tags: [base]
     - role: log_retention
+      when: vipen_manage_host | bool
       tags: [logs]
     - role: network_tuning
+      when: vipen_manage_host | bool
       tags: [network_tuning]
     - role: backup
       tags: [backup]
     - role: ssh
+      when: vipen_manage_host | bool
       tags: [ssh]
-    - role: firewall
-      tags: [firewall]
     - role: docker
+      when: vipen_manage_host | bool
       tags: [docker]
     - role: system_updates
       tags: [updates]
     - role: xui
       tags: [xui]
+    - role: firewall
+      when: vipen_manage_host | bool
+      tags: [firewall]
     - role: vpn_monitor
       tags: [monitor]
     - role: healthcheck

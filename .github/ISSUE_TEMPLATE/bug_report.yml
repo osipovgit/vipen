@@ -1,0 +1,26 @@
+---
+name: Bug report
+description: Report a reproducible problem using synthetic data.
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, database files, subscription URLs or real server identifiers. See SECURITY.md for vulnerabilities.
+  - type: input
+    id: revision
+    attributes:
+      label: Revision and versions
+      description: Git revision, OS, architecture, Ansible, Docker/Compose and 3x-ui versions.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction and observed behavior
+      description: Minimal synthetic configuration, command, expected result and actual result.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted diagnostics and recovery
+      description: Relevant sanitized logs, impact and whether rollback succeeded.

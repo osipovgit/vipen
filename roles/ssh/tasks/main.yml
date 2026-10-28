@@ -1,10 +1,27 @@
 ---
-# ---------------------------------------------------------------------------
-# Authorized keys must exist BEFORE password auth is disabled, otherwise a run
-# (especially a local one, with no SSH session to prove a key works) can lock
-# root out of remote SSH.
-# ---------------------------------------------------------------------------
-- name: Ensure root .ssh directory exists
+- name: Verify a fresh key-only SSH login before hardening
+  ansible.builtin.command: /usr/bin/true
+  changed_when: false
+  become: false
+  check_mode: false
+  vars:
+    ansible_ssh_args: >-
+      -o ControlMaster=no -o ControlPath=none -o BatchMode=yes
+      -o PreferredAuthentications=publickey -o PasswordAuthentication=no
+      -o KbdInteractiveAuthentication=no -o StrictHostKeyChecking=yes
+  when:
+    - ssh_connection_test_required | bool
+    - ansible_connection | default('ssh') == 'ssh'
+
+- name: Require independent verification for local SSH changes
+  ansible.builtin.assert:
+    that: ssh_local_key_login_verified | bool
+    fail_msg: Verify a separate key-only SSH login before local hardening.
+  when:
+    - ssh_connection_test_required | bool
+    - ansible_connection | default('ssh') == 'local'
+
+- name: Ensure root SSH directory exists
   ansible.builtin.file:
     path: /root/.ssh
     state: directory
@@ -20,78 +37,152 @@
     owner: root
     group: root
     mode: "0600"
-  loop: "{{ ssh_authorized_keys | default([]) }}"
-  when: ssh_authorized_keys | default([]) | length > 0
+  loop: "{{ ssh_authorized_keys }}"
 
-- name: Check that root has at least one authorized key
-  ansible.builtin.stat:
-    path: /root/.ssh/authorized_keys
-  register: ssh_root_authorized_keys
-
-- name: Refuse to disable password auth without a usable key (avoid lockout)
-  ansible.builtin.fail:
-    msg: >-
-      Root has no authorized_keys and ssh_authorized_keys is empty. Disabling
-      PasswordAuthentication now would lock out remote SSH. Add your PUBLIC key
-      via ssh_authorized_keys (group_vars or hosts.local.yml), or run ssh-copy-id
-      from your machine, then re-run. To proceed anyway (hosting console only),
-      set ssh_require_authorized_key: false.
-  when:
-    - ssh_require_authorized_key | default(true) | bool
-    - ssh_authorized_keys | default([]) | length == 0
-    - not (ssh_root_authorized_keys.stat.exists and (ssh_root_authorized_keys.stat.size | default(0)) > 0)
-
-# ---------------------------------------------------------------------------
-# sshd hardening
-# ---------------------------------------------------------------------------
-- name: Ensure sshd drop-in directory exists
-  ansible.builtin.file:
-    path: /etc/ssh/sshd_config.d
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
-
-- name: Ensure sshd includes drop-ins
-  ansible.builtin.lineinfile:
-    path: /etc/ssh/sshd_config
-    regexp: '^#?Include\s+/etc/ssh/sshd_config\.d/\*\.conf'
-    line: 'Include /etc/ssh/sshd_config.d/*.conf'
-    insertbefore: BOF
-  register: ssh_include_line
-
-- name: Configure SSH hardening
-  ansible.builtin.copy:
-    dest: /etc/ssh/sshd_config.d/01-vpn.conf
-    owner: root
-    group: root
-    mode: "0644"
-    content: |
-      Port {{ ssh_port }}
-      PubkeyAuthentication yes
-      PasswordAuthentication no
-      KbdInteractiveAuthentication no
-      PermitRootLogin prohibit-password
-      MaxAuthTries 3
-      LoginGraceTime 30
-  register: ssh_hardening_config
-
-- name: Validate sshd config
-  ansible.builtin.command: sshd -t
+- name: Validate that authorized_keys contains a parseable public key
+  ansible.builtin.command: ssh-keygen -l -f /root/.ssh/authorized_keys
   changed_when: false
+  check_mode: false
+  # In check mode proposed keys have not been installed yet.
+  when: not ansible_check_mode or ssh_authorized_keys | length == 0
+
+- name: Restrict existing authorized_keys permissions
+  ansible.builtin.file:
+    path: /root/.ssh/authorized_keys
+    owner: root
+    group: root
+    mode: "0600"
   when: not ansible_check_mode
 
-# Conditional on the config actually changing. `state: reloaded` is documented
-# as "will always reload" and the module hardcodes changed=true for it, so an
-# unconditional reload makes every run report changed - which is both noise and
-# a needless daemon reload on a box whose only remote access is this daemon.
-- name: Reload sshd
-  ansible.builtin.service:
-    name: ssh
-    state: reloaded
-  when:
-    - not ansible_check_mode
-    - ssh_include_line.changed or ssh_hardening_config.changed
+- name: Read SSH configuration and keep recovery copies in memory
+  ansible.builtin.slurp:
+    src: /etc/ssh/sshd_config
+  register: ssh_original
 
-- name: Reset Ansible SSH connection after sshd reload
-  ansible.builtin.meta: reset_connection
+- name: Check previous Vipen SSH drop-in
+  ansible.builtin.stat:
+    path: /etc/ssh/vipen-hardening.conf
+  register: ssh_previous_dropin
+
+- name: Read previous SSH drop-in
+  ansible.builtin.slurp:
+    src: /etc/ssh/vipen-hardening.conf
+  register: ssh_original_dropin
+  when: ssh_previous_dropin.stat.exists
+
+- name: Apply and validate SSH settings with recovery on failure
+  when: not ansible_check_mode
+  block:
+    - name: Ensure SSH drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Put the managed include before other global settings
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config
+        owner: root
+        group: root
+        mode: "0600"
+        backup: true
+        content: >-
+          {{ 'Include /etc/ssh/vipen-hardening.conf\n' ~
+             (ssh_original.content | b64decode | regex_replace('(?m)^Include /etc/ssh/vipen-hardening.conf\n', '')) }}
+      register: ssh_include_line
+
+    - name: Configure SSH hardening without changing the listening port
+      ansible.builtin.copy:
+        dest: /etc/ssh/vipen-hardening.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Port migration is deliberately outside this role.
+          PubkeyAuthentication yes
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PermitRootLogin prohibit-password
+          MaxAuthTries 3
+          LoginGraceTime 30
+      register: ssh_hardening_config
+
+    - name: Validate SSH syntax before reload
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+
+    - name: Read effective SSH configuration for the current client
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/sshd
+          - -T
+          - -C
+          - "user={{ ansible_user | default('root') }},host={{ inventory_hostname }},addr={{ (ansible_facts.get('env', {}).get('SSH_CONNECTION', '').split() | first | default('127.0.0.1', true)) }}"
+      changed_when: false
+      register: ssh_effective
+
+    - name: Require hardening to actually be effective
+      ansible.builtin.assert:
+        that:
+          - "'passwordauthentication no' in ssh_effective.stdout_lines"
+          - "'kbdinteractiveauthentication no' in ssh_effective.stdout_lines"
+          - "'pubkeyauthentication yes' in ssh_effective.stdout_lines"
+          - >-
+            'permitrootlogin without-password' in ssh_effective.stdout_lines or
+            'permitrootlogin prohibit-password' in ssh_effective.stdout_lines
+          - "'maxauthtries 3' in ssh_effective.stdout_lines"
+          - "('port ' ~ (ssh_port | string)) in ssh_effective.stdout_lines"
+        fail_msg: Conflicting effective SSH configuration. Restoring previous files.
+
+    - name: Reload SSH only when configuration changed
+      ansible.builtin.service:
+        name: ssh
+        state: reloaded
+      when: ssh_include_line.changed or ssh_hardening_config.changed
+
+    - name: Verify a new key-only connection after reload
+      ansible.builtin.command: /usr/bin/true
+      changed_when: false
+      become: false
+      vars:
+        ansible_ssh_args: >-
+          -o ControlMaster=no -o ControlPath=none -o BatchMode=yes
+          -o PreferredAuthentications=publickey -o PasswordAuthentication=no
+          -o KbdInteractiveAuthentication=no -o StrictHostKeyChecking=yes
+      when:
+        - ssh_connection_test_required | bool
+        - ansible_connection | default('ssh') == 'ssh'
+  rescue:
+    - name: Restore previous main SSH configuration
+      ansible.builtin.copy:
+        content: "{{ ssh_original.content | b64decode }}"
+        dest: /etc/ssh/sshd_config
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Restore previous SSH drop-in
+      ansible.builtin.copy:
+        content: "{{ ssh_original_dropin.content | b64decode }}"
+        dest: /etc/ssh/vipen-hardening.conf
+        owner: root
+        group: root
+        mode: "0644"
+      when: ssh_previous_dropin.stat.exists
+
+    - name: Remove new SSH drop-in if it did not exist before
+      ansible.builtin.file:
+        path: /etc/ssh/vipen-hardening.conf
+        state: absent
+      when: not ssh_previous_dropin.stat.exists
+
+    - name: Reload restored SSH configuration
+      ansible.builtin.service:
+        name: ssh
+        state: reloaded
+
+    - name: Report rejected SSH change
+      ansible.builtin.fail:
+        msg: SSH hardening failed; previous configuration was restored. Inspect conflicting settings before retrying.

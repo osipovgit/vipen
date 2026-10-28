@@ -6,24 +6,25 @@
 # Setup, bot creation and troubleshooting: docs/alerting.md in the repository.
 #
 # Design rules:
-#   - alerting must never make the health check less reliable: every failure
-#     path exits 0 and only writes to the journal;
+#   - alert delivery failures do not fail the normal health check;
+#     normal health paths exit 0; --test/--report return delivery failures;
 #   - the decision to send is taken BEFORE the config is read, so a healthy
 #     server (the 99% case) stays completely silent even when unconfigured;
 #   - the bot token is read from a 0600 env file and handed to curl on stdin,
 #     so it never appears in the process list.
 set -u
+umask 077
 
-env_file="{{ vpn_monitor_alert_env_file }}"
-state_file="/run/vpn-alert.state"
+env_file={{ vpn_monitor_alert_env_file | quote }}
+state_file={{ vpn_monitor_alert_state_file | quote }}
 
 on_fail="{{ vpn_monitor_alert_on_fail | bool | ternary('true', 'false') }}"
 on_warn="{{ vpn_monitor_alert_on_warn | bool | ternary('true', 'false') }}"
-fail_after="{{ vpn_monitor_alert_fail_after }}"
-repeat_fail="{{ vpn_monitor_alert_repeat_fail_seconds }}"
-repeat_warn="{{ vpn_monitor_alert_repeat_warn_seconds }}"
-timeout="{{ vpn_monitor_alert_timeout_seconds }}"
-label="{{ vpn_monitor_alert_hostname }}"
+fail_after={{ vpn_monitor_alert_fail_after | quote }}
+repeat_fail={{ vpn_monitor_alert_repeat_fail_seconds | quote }}
+repeat_warn={{ vpn_monitor_alert_repeat_warn_seconds | quote }}
+timeout={{ vpn_monitor_alert_timeout_seconds | quote }}
+label={{ vpn_monitor_alert_hostname | quote }}
 
 log() { logger -t vpn-alert "$1"; }
 
@@ -32,7 +33,7 @@ test_mode="false"
 
 # Digest mode: vps-host-daily hands over a ready-made message. It skips the
 # state machine below - a daily summary is not a state transition - but reuses
-# everything after it: config, token handling, scrubbing, exit-0 discipline.
+# everything after it: config, token handling and response validation. Failed reports return nonzero.
 #   vpn-notify --report "<subject>" "<body>"
 report_mode="false"
 [ "${1:-}" = "--report" ] && report_mode="true"
@@ -123,7 +124,7 @@ fi
 # ---------------------------------------------------------------------------
 give_up() {
   log "status=SKIP reason=$1"
-  if [ "$test_mode" = "true" ]; then
+  if [ "$test_mode" = "true" ] || [ "$report_mode" = "true" ]; then
     printf 'vpn-notify: %s\n' "$2" >&2
     exit 1
   fi
@@ -159,11 +160,11 @@ response="$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$ALER
 
 http="$(printf '%s' "$response" | sed -n 's/.*http=\([0-9]*\)$/\1/p')"
 
-if [ "$rc" -ne 0 ] || [ "${http:-0}" != "200" ]; then
+if [ "$rc" -ne 0 ] || [ "${http:-0}" != "200" ] || ! printf '%s' "$response" | head -n -1 | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") is True else 1)' 2>/dev/null; then
   # Telegram echoes the request URL in some errors: scrub the token first.
-  safe="$(printf '%s' "$response" | sed "s|${ALERT_TELEGRAM_TOKEN}|<token>|g" | tr '\n' ' ' | cut -c1-200)"
-  log "status=SEND_FAILED rc=${rc} http=${http:-none} response=${safe}"
-  if [ "$test_mode" = "true" ]; then
+  safe="API request failed"
+  log "status=SEND_FAILED rc=${rc} http=${http:-none}"
+  if [ "$test_mode" = "true" ] || [ "$report_mode" = "true" ]; then
     printf 'vpn-notify: send failed (rc=%s http=%s): %s\n' "$rc" "${http:-none}" "$safe" >&2
     exit 1
   fi

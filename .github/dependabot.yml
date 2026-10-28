@@ -4,4 +4,12 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /molecule
+    schedule:
+      interval: weekly

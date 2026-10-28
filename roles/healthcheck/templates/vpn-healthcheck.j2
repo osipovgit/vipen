@@ -1,132 +1,91 @@
 #!/usr/bin/env bash
-set -u
+set -uo pipefail
+umask 077
+export LC_ALL=C
 
-container="{{ healthcheck_container_name }}"
-timer="{{ healthcheck_monitor_timer_name }}"
-monitor_script="{{ healthcheck_monitor_script_path }}"
-report="{{ healthcheck_report_path }}"
-journal_since="{{ healthcheck_since }}"
-docker_since="{{ healthcheck_docker_since }}"
-
+container={{ healthcheck_container_name | quote }}
+timer={{ healthcheck_monitor_timer_name | quote }}
+monitor_script={{ healthcheck_monitor_script_path | quote }}
+report={{ healthcheck_report_path | quote }}
+journal_since={{ healthcheck_since | quote }}
+docker_since={{ healthcheck_docker_since | quote }}
+command_timeout={{ healthcheck_command_timeout_seconds }}
 mkdir -p "$(dirname "$report")"
+# Pre-create with 0600 even if a previous run left a more permissive file.
+if [ -L "$report" ]; then printf 'Refusing symlink report\n' >&2; exit 1; fi
+: > "$report"
+chmod 0600 "$report"
 exec > >(tee "$report") 2>&1
-
 failed=0
+section() { printf '\n===== %s =====\n' "$1"; }
+fail() { failed=1; printf 'FAIL: %s\n' "$1"; }
+ok() { printf 'OK: %s\n' "$1"; }
 
-section() {
-  printf '\n===== %s =====\n' "$1"
-}
-
-fail() {
-  failed=1
-  printf 'FAIL: %s\n' "$1"
-}
-
-ok() {
-  printf 'OK: %s\n' "$1"
-}
-
-section "summary"
+section summary
 printf 'time=%s\n' "$(date -Is)"
-printf 'journal_since=%s docker_since=%s\n' "$journal_since" "$docker_since"
-
-section "monitor script"
+section 'monitor script'
 if [ ! -x "$monitor_script" ]; then
-  fail "monitor script is missing or not executable: $monitor_script"
+  fail 'monitor script is missing'
+elif timeout --kill-after=5 {{ vpn_monitor_service_timeout_seconds | default(180) }} "$monitor_script" --no-restart; then
+  ok 'diagnostic completed; WARNs must still be reviewed'
 else
-  # Diagnostic mode: never mutate the failure counter or restart the container.
-  if "$monitor_script" --no-restart; then
-    ok "monitor script returned OK"
+  fail 'diagnostic failed or timed out'
+fi
+
+section 'systemd timer'
+if timeout "$command_timeout" systemctl is-active --quiet "$timer"; then ok "$timer is active"; else fail "$timer is inactive or unreachable"; fi
+if failed_units="$(timeout "$command_timeout" systemctl --failed --no-legend --plain 2>/dev/null)"; then
+  if [ -n "$failed_units" ]; then printf '%s\n' "$failed_units"; fail 'systemd has failed units'; fi
+else
+  fail 'systemd query failed'
+fi
+
+section 'container state'
+if inspect="$(timeout "$command_timeout" docker inspect -f 'running={{ "{{" }}.State.Running{{ "}}" }} oom={{ "{{" }}.State.OOMKilled{{ "}}" }} exit={{ "{{" }}.State.ExitCode{{ "}}" }} restarts={{ "{{" }}.RestartCount{{ "}}" }}' "$container" 2>/dev/null)"; then
+  printf '%s\n' "$inspect"
+  [[ "$inspect" == *running=true* ]] || fail 'container is not running'
+  [[ "$inspect" == *oom=true* ]] && fail 'container was OOM-killed'
+else
+  fail 'container query failed or timed out'
+fi
+
+section 'recent scheduled checks'
+if vpn_health_logs="$(timeout "$command_timeout" journalctl -q -t vpn-health --since "{{ healthcheck_monitor_freshness_seconds }} seconds ago" --no-pager -o cat 2>/dev/null)"; then
+  if ! printf '%s\n' "$vpn_health_logs" | grep -Eq '^status=(OK|WARN|FAIL) '; then
+    fail 'no fresh scheduled health samples'
   else
-    fail "monitor script returned non-zero"
+    printf '%s\n' "$vpn_health_logs" | tail -20
+    if printf '%s\n' "$vpn_health_logs" | grep -Eq '^status=(WARN|FAIL) '; then fail 'recent scheduled checks contain WARN or FAIL'; fi
   fi
+else
+  fail 'health journal query failed'
 fi
 
-section "systemd timer"
-if systemctl is-active --quiet "$timer"; then
-  ok "$timer is active"
-else
-  fail "$timer is not active"
-fi
-systemctl list-timers "$timer" --no-pager || true
-
-section "failed units"
-failed_units="$(systemctl --failed --no-legend --plain 2>/dev/null || true)"
-if [ -n "$failed_units" ]; then
-  printf '%s\n' "$failed_units"
-  fail "systemd has failed units"
-else
-  ok "no failed systemd units"
-fi
-
-section "container state"
-if ! command -v docker >/dev/null 2>&1; then
-  fail "docker command is missing"
-else
-  inspect="$(docker inspect -f 'running={{ "{{" }}.State.Running{{ "}}" }} oom={{ "{{" }}.State.OOMKilled{{ "}}" }} exit={{ "{{" }}.State.ExitCode{{ "}}" }} restarts={{ "{{" }}.RestartCount{{ "}}" }} started={{ "{{" }}.State.StartedAt{{ "}}" }}' "$container" 2>/dev/null || true)"
-  if [ -z "$inspect" ]; then
-    fail "container $container not found"
+critical_regex='panic|fatal|segfault|oom|out of memory|no space left on device|address already in use|permission denied|cannot allocate memory|hung task|i/o error|nf_conntrack.*table full|clocksource: long readout interval'
+scan() {
+  local label="$1" output matches
+  shift
+  section "$label"
+  if output="$(timeout "$command_timeout" "$@" 2>&1)"; then
+    matches="$(printf '%s\n' "$output" | grep -Ei "$critical_regex" | grep -Eiv 'failed login|securecookie|syslog backend disabled' || true)"
+    if [ -n "$matches" ]; then printf '%s\n' "$matches" | tail -80; fail "$label contains critical patterns"; else ok "$label has no critical patterns"; fi
   else
-    printf '%s\n' "$inspect"
-    printf '%s\n' "$inspect" | grep -q 'running=true' || fail "container is not running"
-    printf '%s\n' "$inspect" | grep -q 'oom=true' && fail "container was OOM-killed"
+    fail "$label could not be read"
   fi
-fi
-
-section "recent vpn-health"
-vpn_health_logs="$(journalctl -t vpn-health --since "$journal_since" --no-pager 2>/dev/null || true)"
-if [ -z "$vpn_health_logs" ]; then
-  fail "no vpn-health log entries in selected window"
+}
+scan 'service journal' journalctl -q -u docker -u containerd -u vpn-health.service --since "$journal_since" --no-pager
+scan 'container logs' docker logs --since "$docker_since" --tail 500 "$container"
+scan 'kernel journal' journalctl -q -k --since "$journal_since" --no-pager
+section 'host anomalies'
+if host_logs="$(timeout "$command_timeout" journalctl -q -t vps-host-monitor --since "$journal_since" --no-pager 2>/dev/null)"; then
+  if printf '%s\n' "$host_logs" | grep -q 'status=WARN'; then fail 'host monitor reports anomalies'; fi
 else
-  printf '%s\n' "$vpn_health_logs" | tail -20
-  if printf '%s\n' "$vpn_health_logs" | grep -Eq 'status=(WARN|FAIL)'; then
-    fail "recent vpn-health contains WARN or FAIL"
-  fi
+  fail 'host journal could not be read'
 fi
-
-section "recent critical service logs"
-critical_regex='panic|fatal|segfault|oom|out of memory|no space left on device|address already in use|permission denied|cannot allocate memory'
-service_logs="$(
-  {
-    journalctl -u docker -u containerd -u vpn-health.service --since "$journal_since" --no-pager 2>/dev/null
-    docker logs --since "$docker_since" --tail 500 "$container" 2>&1
-  } | grep -Ei "$critical_regex" | grep -Eiv 'failed login|securecookie|syslog backend disabled' || true
-)"
-if [ -n "$service_logs" ]; then
-  printf '%s\n' "$service_logs" | tail -80
-  fail "recent service/container logs contain critical patterns"
-else
-  ok "no recent critical service/container patterns"
-fi
-
-section "recent kernel critical logs"
-kernel_logs="$(journalctl -k --since "$journal_since" --no-pager 2>/dev/null | grep -Ei "$critical_regex|blocked for more than|hung task|i/o error|link is down|nf_conntrack.*table full|clocksource: long readout interval|workqueue: .* hogged cpu" || true)"
-if [ -n "$kernel_logs" ]; then
-  printf '%s\n' "$kernel_logs" | tail -80
-  fail "recent kernel logs contain critical patterns"
-else
-  ok "no recent critical kernel patterns"
-fi
-
-section "recent VPS host anomalies"
-host_logs="$(journalctl -t vps-host-monitor --since "$journal_since" --no-pager 2>/dev/null | grep 'status=WARN' || true)"
-if [ -n "$host_logs" ]; then
-  printf '%s\n' "$host_logs" | tail -80
-  fail "recent VPS host monitor contains WARN"
-else
-  ok "no recent hypervisor delay or CPU steal anomalies"
-fi
-
-section "latest resources"
-df -hT /
-free -h
-ss -s
-
-section "result"
-if [ "$failed" -eq 0 ]; then
-  printf 'HEALTHCHECK OK\n'
-  exit 0
-fi
-
-printf 'HEALTHCHECK FAILED report=%s\n' "$report"
-exit 1
+section resources
+timeout "$command_timeout" df -hT / || fail 'filesystem query failed'
+timeout "$command_timeout" free -h || fail 'memory query failed'
+timeout "$command_timeout" ss -s || fail 'socket query failed'
+section result
+if [ "$failed" -eq 0 ]; then printf 'HEALTHCHECK OK\n'; else printf 'HEALTHCHECK FAILED report=%s\n' "$report"; fi
+exit "$failed"

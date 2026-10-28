@@ -2,18 +2,30 @@ services:
   3xui:
     image: "{{ xui_image }}"
     container_name: "{{ xui_container_name }}"
+    cap_drop:
+      - NET_RAW
 {% if xui_container_cap_add | length > 0 %}
     cap_add:
 {% for cap in xui_container_cap_add %}
       - {{ cap }}
 {% endfor %}
 {% endif %}
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: {{ xui_container_pids_limit }}
+{% if xui_container_memory_limit != '0' %}
+    mem_limit: "{{ xui_container_memory_limit }}"
+{% endif %}
     volumes:
       - "{{ xui_db_dir }}/:/etc/x-ui/"
-      - "{{ xui_cert_dir }}/:/root/cert/"
+      - "{{ xui_cert_dir }}/:/root/cert/:ro"
     environment:
       XRAY_VMESS_AEAD_FORCED: "false"
-      XUI_ENABLE_FAIL2BAN: "true"
-    tty: true
+      XUI_ENABLE_FAIL2BAN: "{{ xui_container_fail2ban_enabled | bool | ternary('true', 'false') }}"
     network_mode: host
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "{{ docker_log_max_size }}"
+        max-file: "{{ docker_log_max_file }}"

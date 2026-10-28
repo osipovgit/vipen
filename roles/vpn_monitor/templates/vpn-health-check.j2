@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-set -u
+set -uo pipefail
+umask 077
+export LC_ALL=C
 
-container="{{ vpn_monitor_container_name }}"
-panel_host="{{ vpn_monitor_panel_host }}"
-panel_port="{{ vpn_monitor_panel_port }}"
-disk_warn="{{ vpn_monitor_disk_warn_percent }}"
-disk_fail="{{ vpn_monitor_disk_fail_percent }}"
-mem_warn="{{ vpn_monitor_mem_warn_mb }}"
-conntrack_warn="{{ vpn_monitor_conntrack_warn_percent }}"
-backup_dir="{{ vpn_monitor_backup_dir }}"
-backup_max_age_hours="{{ vpn_monitor_backup_max_age_hours }}"
+container={{ vpn_monitor_container_name | quote }}
+panel_host={{ vpn_monitor_panel_host | quote }}
+panel_port={{ vpn_monitor_panel_port | quote }}
+disk_warn={{ vpn_monitor_disk_warn_percent | quote }}
+disk_fail={{ vpn_monitor_disk_fail_percent | quote }}
+mem_warn={{ vpn_monitor_mem_warn_mb | quote }}
+conntrack_warn={{ vpn_monitor_conntrack_warn_percent | quote }}
+backup_dir={{ vpn_monitor_backup_dir | quote }}
+backup_max_age_hours={{ vpn_monitor_backup_max_age_hours | quote }}
 auto_restart="{{ vpn_monitor_auto_restart | bool | ternary('true', 'false') }}"
-failure_threshold="{{ vpn_monitor_failure_threshold }}"
-state_file="/run/vpn-health.failures"
+failure_threshold={{ vpn_monitor_failure_threshold | quote }}
+state_file={{ vpn_monitor_state_file | quote }}
 
 # Diagnostic (non-mutating) mode: report status/exit code but never touch the
 # shared failure counter and never restart the container. Used by the manual
@@ -26,8 +28,21 @@ for arg in "$@"; do
 done
 [ "${VPN_HEALTH_NO_RESTART:-}" = "1" ] && no_restart="true"
 
+command_timeout={{ vpn_monitor_command_timeout_seconds | quote }}
+# Keep a shared lock until this process exits, including any restart below.
+# Backups also hold shared locks; deployment requires an exclusive lock.
+if ! exec 9>>{{ vpn_monitor_deploy_lock_file | quote }}; then
+  printf 'status=FAIL deployment_lock_unavailable\n'
+  exit 1
+fi
+if ! flock -s -n 9; then
+  printf 'status=WARN maintenance=deployment_in_progress\n'
+  exit 0
+fi
+
 tcp_ports=({% for port in vpn_monitor_tcp_ports %}{{ port }}{% if not loop.last %} {% endif %}{% endfor %})
 
+restart_eligible="false"
 status="OK"
 messages=()
 
@@ -46,15 +61,17 @@ mark_fail() {
 check_tcp() {
   local host="$1"
   local port="$2"
-  timeout 5 bash -c "</dev/tcp/${host}/${port}" >/dev/null 2>&1
+  # shellcheck disable=SC2016 # Expanded by the child shell from positional arguments.
+  timeout 5 bash -c 'exec 3<>/dev/tcp/$1/$2' _ "$host" "$port" >/dev/null 2>&1
 }
 
 if ! command -v docker >/dev/null 2>&1; then
   mark_fail "docker command missing"
 else
-  running="$(docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}' "$container" 2>/dev/null || true)"
-  restart_count="$(docker inspect -f '{{ "{{" }}.RestartCount{{ "}}" }}' "$container" 2>/dev/null || echo unknown)"
+  running="$(timeout "$command_timeout" docker inspect -f '{{ "{{" }}.State.Running{{ "}}" }}' "$container" 2>/dev/null || true)"
+  restart_count="$(timeout "$command_timeout" docker inspect -f '{{ "{{" }}.RestartCount{{ "}}" }}' "$container" 2>/dev/null || echo unknown)"
   if [ "$running" != "true" ]; then
+    restart_eligible="true"
     mark_fail "container ${container} not running"
   else
     messages+=("container=${container} running restart_count=${restart_count}")
@@ -62,24 +79,45 @@ else
 fi
 
 if ! check_tcp "$panel_host" "$panel_port"; then
+  restart_eligible="true"
   mark_fail "panel tcp ${panel_host}:${panel_port} unavailable"
 else
   messages+=("panel_tcp=${panel_host}:${panel_port} ok")
 fi
 
+# Read listeners on every run: clients/inbounds may change through the panel.
+listeners=""
+inbound_count=0
+if db_state="$(timeout "$command_timeout" python3 "{{ vpn_monitor_db_tool_path }}" inspect "{{ vpn_monitor_db_dir }}/x-ui.db" 2>/dev/null)"; then
+  listeners="$(printf '%s' "$db_state" | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(p["host"], p["port"]) for p in d["tcp_listeners"]]; print(d["subscription_listen"], d["subscription_port"]) if d["subscription_enabled"] else None')"
+  inbound_count="$(printf '%s' "$db_state" | python3 -c 'import json,sys; print(json.load(sys.stdin)["inbound_count"])')"
+else
+  mark_fail "database_listener_discovery_failed"
+fi
 for port in "${tcp_ports[@]}"; do
-  if ! check_tcp "127.0.0.1" "$port"; then
-    mark_fail "local tcp 127.0.0.1:${port} unavailable"
-  else
-    messages+=("local_tcp=127.0.0.1:${port} ok")
-  fi
+  listeners+=$'\n'"127.0.0.1 $port"
 done
+while read -r host port; do
+  [ -z "$port" ] && continue
+  if ! check_tcp "$host" "$port"; then
+    restart_eligible="true"
+    mark_fail "local tcp ${host}:${port} unavailable"
+  else
+    messages+=("local_tcp=${host}:${port} ok")
+  fi
+done <<< "$listeners"
 
-if command -v docker >/dev/null 2>&1 && [ "${running:-false}" = "true" ]; then
-  # Match xray on any architecture (xray-linux-amd64, xray-linux-arm64, ...).
-  if docker exec "$container" sh -lc 'ps | grep -q "[x]ray-linux"' >/dev/null 2>&1; then
+if [ "$inbound_count" -eq 0 ]; then
+{% if vpn_monitor_expect_inbounds | bool %}
+  mark_fail "no_enabled_inbounds"
+{% else %}
+  mark_warn "bootstrap_no_enabled_inbounds"
+{% endif %}
+elif command -v docker >/dev/null 2>&1 && [ "${running:-false}" = "true" ]; then
+  if timeout "$command_timeout" docker exec "$container" sh -lc 'ps | grep -q "[x]ray-linux"' >/dev/null 2>&1; then
     messages+=("xray_process=ok")
   else
+    restart_eligible="true"
     mark_fail "xray process missing inside container"
   fi
 fi
@@ -119,7 +157,7 @@ fi
 # working one until the day it is needed, which is the worst possible day to
 # find out. WARN, not FAIL: the VPN itself is still serving traffic.
 if [ -n "$backup_dir" ] && [ "$backup_max_age_hours" -gt 0 ]; then
-  backup_state="$(systemctl is-active xui-backup.service 2>/dev/null || true)"
+  backup_state="$(timeout "$command_timeout" systemctl is-active xui-backup.service 2>/dev/null || true)"
   case "$backup_state" in
     activating | active | reloading)
       # A snapshot is being written right now, so the newest finished one is by
@@ -149,7 +187,7 @@ fi
 # systemd's own failure list. This is the one check that also covers the
 # monitoring itself: a broken xui-backup.timer or vps-host-daily.service would
 # otherwise fail silently, and nothing else here would ever notice.
-failed_units="$(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}' | paste -sd, - | cut -c1-200)"
+failed_units="$(timeout "$command_timeout" systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}' | paste -sd, - | cut -c1-200)" || mark_warn "systemd_query_failed"
 if [ -n "$failed_units" ]; then
   mark_warn "failed_units=${failed_units}"
 fi
@@ -162,13 +200,13 @@ fi
 #
 # Ask ufw itself rather than systemd, for the reason above. A missing binary
 # fails the pipeline and lands in the same branch, which is the answer we want.
-if ufw status 2>/dev/null | grep -q '^Status: active'; then
+if timeout "$command_timeout" ufw status 2>/dev/null | grep -q '^Status: active'; then
   messages+=("ufw=active")
 else
   mark_warn "ufw_inactive"
 fi
 
-fail2ban_state="$(systemctl is-active fail2ban 2>/dev/null || true)"
+fail2ban_state="$(timeout "$command_timeout" systemctl is-active fail2ban 2>/dev/null || true)"
 if [ "$fail2ban_state" = "active" ]; then
   messages+=("fail2ban=active")
 else
@@ -180,7 +218,7 @@ fi
 # rejecting new handshakes while the container, the ports and the xray process
 # all still look perfectly healthy. Reads the kernel sync flag, so it is true
 # for whichever NTP client disciplines the clock, not just systemd-timesyncd.
-if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]; then
+if [ "$(timeout "$command_timeout" timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]; then
   messages+=("time_sync=ok")
 else
   mark_warn "time_unsynced"
@@ -194,13 +232,13 @@ load1="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
 if command -v ss >/dev/null 2>&1; then
   established=0
   for port in "${tcp_ports[@]}"; do
-    port_conns="$(ss -H -tn state established "( sport = :${port} )" 2>/dev/null | wc -l)"
+    port_conns="$(timeout "$command_timeout" ss -H -tn state established "( sport = :${port} )" 2>/dev/null | wc -l)"
     established=$((established + port_conns))
   done
   messages+=("established=${established}")
 fi
 
-if journalctl -k --since "2 minutes ago" --no-pager 2>/dev/null | grep -q 'clocksource: Long readout interval'; then
+if timeout "$command_timeout" journalctl -q -k --since "2 minutes ago" --no-pager 2>/dev/null | grep -q 'clocksource: Long readout interval'; then
   mark_warn "hypervisor_pause_detected"
 fi
 
@@ -225,17 +263,20 @@ else
     printf '0\n' > "$state_file"
   fi
 
-  if [ "$status" = "FAIL" ] && [ "$auto_restart" = "true" ] && [ "$failures" -ge "$failure_threshold" ]; then
+  if [ "$restart_eligible" = "true" ] && [ "$status" = "FAIL" ] && [ "$auto_restart" = "true" ] && [ "$failures" -ge "$failure_threshold" ]; then
     if command -v docker >/dev/null 2>&1; then
       messages+=("auto_restart=triggered failures=${failures}")
-      docker restart "$container" >/dev/null 2>&1 || true
-      printf '0\n' > "$state_file"
+      if timeout --kill-after=5 "$command_timeout" docker restart "$container" >/dev/null 2>&1; then
+        printf '0\n' > "$state_file"
+      else
+        messages+=("auto_restart=failed_or_timed_out")
+      fi
     fi
   fi
 fi
 
 line="status=${status} failures=${failures} ${messages[*]}"
-logger -t vpn-health "$line"
+if [ "$no_restart" = "true" ]; then logger -t vpn-health-diagnostic "$line"; else logger -t vpn-health "$line"; fi
 printf '%s\n' "$line"
 
 # Push notification. Skipped in diagnostic mode so a manual run can never spam

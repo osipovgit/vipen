@@ -32,3 +32,15 @@ inventories/production/secrets.yml
 
 # Local virtualenvs, e.g. for the Molecule stack in molecule/requirements.txt.
 .venv*/
+
+# SQLite sidecars, recovery exports and Python test artifacts.
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite*
+*.sql
+*.pem
+*.key
+*.tar.gz
+__pycache__/
+*.pyc

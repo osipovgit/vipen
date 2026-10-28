@@ -1,22 +1,11 @@
 ---
-- name: Remove legacy Docker list repository
-  ansible.builtin.file:
-    path: /etc/apt/sources.list.d/docker.list
-    state: absent
-  when: not ansible_check_mode
-
-- name: Remove unused Docker gpg keyring
-  ansible.builtin.file:
-    path: /etc/apt/keyrings/docker.gpg
-    state: absent
-  when: not ansible_check_mode
-
 - name: Install Docker prerequisites
   ansible.builtin.apt:
     name:
       - ca-certificates
       - curl
       - gnupg
+      - python3-debian
     state: present
   when: not ansible_check_mode
 
@@ -54,6 +43,12 @@
     state: present
   when: not ansible_check_mode
 
+- name: Remove legacy Docker repository after the replacement is prepared
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/docker.list
+    state: absent
+  when: not ansible_check_mode
+
 - name: Refresh apt cache after Docker repo change
   ansible.builtin.apt:
     update_cache: true
@@ -70,21 +65,26 @@
     state: present
   when: not ansible_check_mode
 
-- name: Configure Docker daemon
+- name: Check existing Docker configuration
+  ansible.builtin.stat:
+    path: /etc/docker/daemon.json
+  register: docker_config_file
+
+- name: Read existing Docker configuration
+  ansible.builtin.slurp:
+    src: /etc/docker/daemon.json
+  register: docker_config_original
+  when: docker_config_file.stat.exists
+
+- name: Merge managed Docker settings without discarding other options
   ansible.builtin.copy:
     dest: /etc/docker/daemon.json
     owner: root
     group: root
     mode: "0644"
-    content: |
-      {
-        "log-driver": "json-file",
-        "log-opts": {
-          "max-size": "10m",
-          "max-file": "3"
-        },
-        "live-restore": true
-      }
+    backup: true
+    validate: /usr/bin/dockerd --validate --config-file %s
+    content: "{{ (docker_config_original.content | default('e30=') | b64decode | from_json) | combine({'live-restore': true}) | to_nice_json }}\n"
   register: docker_daemon_config
   when: not ansible_check_mode
 
@@ -96,9 +96,7 @@
   register: docker_service
   when: not ansible_check_mode
 
-# The package may have started Docker with default config before daemon.json
-# existed, so a change to it must be reloaded. reload (SIGHUP) applies log-opts
-# and live-restore without stopping running containers.
+# Reload live-restore; container log limits belong to the Compose service.
 - name: Reload Docker to apply daemon config changes
   ansible.builtin.service:
     name: docker

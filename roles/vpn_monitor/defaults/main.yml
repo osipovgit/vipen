@@ -6,8 +6,13 @@ vpn_monitor_container_name: 3xui_app
 vpn_monitor_panel_host: 127.0.0.1
 # Placeholder only: the real port comes from panel_port in secrets.yml.
 vpn_monitor_panel_port: 54836
-vpn_monitor_tcp_ports:
-  - 443
+vpn_monitor_tcp_ports: []
+vpn_monitor_expect_inbounds: false
+vpn_monitor_command_timeout_seconds: 10
+vpn_monitor_service_timeout_seconds: 180
+vpn_monitor_db_tool_path: /usr/local/libexec/vipen/xui_db.py
+vpn_monitor_db_dir: /opt/vipen/db
+vpn_monitor_deploy_lock_file: /run/vipen-deploy.lock
 vpn_monitor_disk_warn_percent: 85
 vpn_monitor_disk_fail_percent: 95
 vpn_monitor_mem_warn_mb: 128
@@ -44,3 +49,7 @@ vpn_monitor_alert_repeat_warn_seconds: 21600
 vpn_monitor_alert_timeout_seconds: 10
 vpn_monitor_alert_telegram_token: ""
 vpn_monitor_alert_telegram_chat_id: ""
+
+vpn_monitor_state_file: /run/vpn-health.failures
+vpn_monitor_alert_state_file: /run/vpn-alert.state
+vpn_monitor_digest_state_dir: /var/lib/vipen/digest

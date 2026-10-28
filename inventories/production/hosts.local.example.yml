@@ -20,6 +20,9 @@ all:
           # on YOUR machine (not here):
           #   ssh-keygen -t ed25519 -f ~/.ssh/vipen
           # then paste the contents of ~/.ssh/vipen.pub below. Without it the
-          # role stops before disabling password auth (ssh_require_authorized_key).
+          # role validates the actual key and requires independent verification.
+          # For host management only, after verifying a NEW external key login:
+          # vipen_manage_host: true
+          # ssh_local_key_login_verified: true
           # ssh_authorized_keys:
           #   - "ssh-ed25519 AAAA...your-public-key... you@laptop"
