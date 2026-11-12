@@ -2,6 +2,6 @@
 # an idempotence test that silently changes behaviour between runs is worse than
 # no test at all. Bump deliberately, not by drift.
 ansible-core==2.21.5
-molecule==26.10.0
+molecule==26.11.0
 molecule-plugins[docker]==26.10.12
 docker==7.2.0
